@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Minus,
   PiggyBank,
+  Power,
   RefreshCw,
   Save,
   Search,
@@ -19,6 +20,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Target,
+  Trash2,
   Wallet,
   X,
 } from 'lucide-react'
@@ -64,6 +66,9 @@ type SnapshotError = {
 
 type ConfigStatus = {
   apiPort: number
+  autoStart: boolean
+  canManageAutoStart: boolean
+  canResetApp: boolean
   hasClientId: boolean
   hasClientSecret: boolean
   hasItemId: boolean
@@ -192,6 +197,14 @@ function getMetricComparison(current: number, previous?: number, mode: 'higher-i
     sentiment: isPositive ? 'positive' : 'negative',
     trend,
   } satisfies MetricComparison
+}
+
+function clearGranaFlowBrowserData() {
+  Object.keys(window.localStorage).forEach((key) => {
+    if (key.startsWith('granaflow:')) {
+      window.localStorage.removeItem(key)
+    }
+  })
 }
 
 function App() {
@@ -465,7 +478,7 @@ function App() {
               }`}
             >
               <Settings className="size-4" aria-hidden="true" />
-              Credenciais
+              Configurações
             </button>
             {activeView === 'monthly' ? (
               <>
@@ -696,7 +709,7 @@ function App() {
       )}
 
       {isConfigOpen ? (
-        <CredentialsModal
+        <SettingsModal
           status={configStatus}
           onClose={() => setIsConfigOpen(false)}
           onSaved={(status) => {
@@ -935,7 +948,7 @@ type AnnualChartTooltip = {
   y: number
 }
 
-function CredentialsModal({
+function SettingsModal({
   onClose,
   onSaved,
   status,
@@ -947,8 +960,16 @@ function CredentialsModal({
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [itemId, setItemId] = useState('')
+  const [autoStart, setAutoStart] = useState(Boolean(status?.autoStart))
   const [isSaving, setIsSaving] = useState(false)
+  const [isResetting, setIsResetting] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const isBusy = isSaving || isResetting || isStopping
+
+  useEffect(() => {
+    setAutoStart(Boolean(status?.autoStart))
+  }, [status?.autoStart])
 
   async function saveConfig() {
     setIsSaving(true)
@@ -956,7 +977,12 @@ function CredentialsModal({
 
     try {
       const response = await fetch('/api/config', {
-        body: JSON.stringify({ clientId, clientSecret, itemId }),
+        body: JSON.stringify({
+          autoStart: status?.canManageAutoStart ? autoStart : undefined,
+          clientId,
+          clientSecret,
+          itemId,
+        }),
         headers: { 'Content-Type': 'application/json' },
         method: 'POST',
       })
@@ -969,19 +995,64 @@ function CredentialsModal({
 
       onSaved(payload as ConfigStatus)
     } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : 'Nao foi possivel salvar as credenciais.')
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível salvar as configurações.')
     } finally {
       setIsSaving(false)
     }
   }
 
+  async function resetAppData() {
+    const confirmed = window.confirm('Apagar todos os dados locais do GranaFlow e encerrar o serviço? Na próxima abertura, o app volta para a primeira execução.')
+
+    if (!confirmed) {
+      return
+    }
+
+    setIsResetting(true)
+    setMessage(null)
+
+    try {
+      const response = await fetch('/api/app/reset', { method: 'POST' })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.details ? `${payload.error} ${payload.details}` : payload.error)
+      }
+
+      clearGranaFlowBrowserData()
+      setMessage('Dados locais apagados. O serviço será encerrado agora.')
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível apagar os dados locais.')
+      setIsResetting(false)
+    }
+  }
+
+  async function stopAppService() {
+    setIsStopping(true)
+    setMessage(null)
+
+    try {
+      const response = await fetch('/api/app/shutdown', { method: 'POST' })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.details ? `${payload.error} ${payload.details}` : payload.error)
+      }
+
+      setMessage('Serviço encerrado. Você pode fechar esta aba.')
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível encerrar o serviço.')
+      setIsStopping(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-[#030504]/75 p-4 backdrop-blur-sm">
-      <section className="w-full max-w-xl rounded-lg border border-[#244438] bg-[#09100d] p-5 shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
+      <section className="w-full max-w-2xl rounded-lg border border-[#244438] bg-[#09100d] p-5 shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-2xl font-semibold text-white">Credenciais Pluggy</h2>
-            <p className="mt-1 text-sm text-[#8ba397]">Salva em `.env.local` nesta maquina.</p>
+            <h2 className="text-2xl font-semibold text-white">Configurações</h2>
+            <p className="mt-1 text-sm text-[#8ba397]">Credenciais e preferências locais do GranaFlow.</p>
           </div>
           <button
             className="grid size-10 place-items-center rounded-lg border border-[#263c34] bg-[#101a16] text-[#8ba397] transition hover:border-[#39d681] hover:text-white"
@@ -993,47 +1064,95 @@ function CredentialsModal({
           </button>
         </div>
 
-        <div className="mt-5 grid gap-3">
-          <CredentialField
-            label="Client ID"
-            placeholder={status?.hasClientId ? 'Ja configurado; deixe vazio para manter' : 'Pluggy Client ID'}
-            value={clientId}
-            onChange={setClientId}
-          />
-          <CredentialField
-            label="Client Secret"
-            placeholder={status?.hasClientSecret ? 'Ja configurado; deixe vazio para manter' : 'Pluggy Client Secret'}
-            type="password"
-            value={clientSecret}
-            onChange={setClientSecret}
-          />
-          <CredentialField
-            label="Item ID"
-            placeholder={status?.itemIdPreview ?? 'Pluggy Item ID'}
-            value={itemId}
-            onChange={setItemId}
-          />
+        <div className="mt-5 grid gap-5">
+          <section className="rounded-lg border border-[#1f332b] bg-[#0b1410] p-4">
+            <h3 className="text-sm font-semibold uppercase text-[#8ba397]">Pluggy</h3>
+            <div className="mt-4 grid gap-3">
+              <CredentialField
+                label="Client ID"
+                placeholder={status?.hasClientId ? 'Já configurado; deixe vazio para manter' : 'Pluggy Client ID'}
+                value={clientId}
+                onChange={setClientId}
+              />
+              <CredentialField
+                label="Client Secret"
+                placeholder={status?.hasClientSecret ? 'Já configurado; deixe vazio para manter' : 'Pluggy Client Secret'}
+                type="password"
+                value={clientSecret}
+                onChange={setClientSecret}
+              />
+              <CredentialField
+                label="Item ID"
+                placeholder={status?.itemIdPreview ?? 'Pluggy Item ID'}
+                value={itemId}
+                onChange={setItemId}
+              />
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-[#1f332b] bg-[#0b1410] p-4">
+            <h3 className="text-sm font-semibold uppercase text-[#8ba397]">Aplicativo</h3>
+            <label className={`mt-4 flex items-center justify-between gap-4 rounded-lg border border-[#263c34] bg-[#101a16] px-3 py-3 ${status?.canManageAutoStart ? 'cursor-pointer' : 'opacity-60'}`}>
+              <span>
+                <span className="block text-sm font-semibold text-white">Inicializar com o Windows</span>
+                <span className="mt-1 block text-xs text-[#6f897c]">
+                  {status?.canManageAutoStart ? 'Usa o executável portable atual.' : 'Disponível ao abrir pelo executável.'}
+                </span>
+              </span>
+              <span className="relative inline-flex h-7 w-12 shrink-0 items-center">
+                <input
+                  checked={autoStart}
+                  className="peer sr-only"
+                  disabled={!status?.canManageAutoStart || isBusy}
+                  type="checkbox"
+                  onChange={(event) => setAutoStart(event.target.checked)}
+                />
+                <span className="absolute inset-0 rounded-full border border-[#31493f] bg-[#17231f] transition peer-checked:border-[#42f08f] peer-checked:bg-[#123327]" />
+                <span className="absolute left-1 size-5 rounded-full bg-[#6f897c] transition peer-checked:translate-x-5 peer-checked:bg-[#42f08f]" />
+              </span>
+            </label>
+          </section>
         </div>
 
         {message ? (
-          <div className="mt-4 rounded-lg border border-[#563032] bg-[#251113] px-3 py-2 text-sm text-[#ffb8b8]">
+          <div className="mt-4 rounded-lg border border-[#2b4d3e] bg-[#101a16] px-3 py-2 text-sm text-[#d8ffe7]">
             {message}
           </div>
         ) : null}
 
-        <div className="mt-5 flex items-center justify-between gap-3">
+        <div className="mt-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <p className="text-xs text-[#6f897c]">
-            O secret nao e exibido depois de salvo. Campos vazios mantem o valor atual.
+            O secret não é exibido depois de salvo. Campos vazios mantêm o valor atual.
           </p>
-          <button
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f] disabled:cursor-wait disabled:opacity-70"
-            disabled={isSaving}
-            type="button"
-            onClick={() => void saveConfig()}
-          >
-            {isSaving ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Save className="size-4" aria-hidden="true" />}
-            Salvar
-          </button>
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <button
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-[#563032] bg-[#251113] px-3 text-sm font-semibold text-[#ffb8b8] transition hover:border-[#ff8d8d] disabled:cursor-wait disabled:opacity-60"
+              disabled={isBusy || !status?.canResetApp}
+              type="button"
+              onClick={() => void resetAppData()}
+            >
+              {isResetting ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
+              Deletar dados
+            </button>
+            <button
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#d94747] px-3 text-sm font-semibold text-white transition hover:bg-[#ff5f64] disabled:cursor-wait disabled:opacity-60"
+              disabled={isBusy}
+              type="button"
+              onClick={() => void stopAppService()}
+            >
+              {isStopping ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Power className="size-4" aria-hidden="true" />}
+              Encerrar serviço
+            </button>
+            <button
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f] disabled:cursor-wait disabled:opacity-70"
+              disabled={isBusy}
+              type="button"
+              onClick={() => void saveConfig()}
+            >
+              {isSaving ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Save className="size-4" aria-hidden="true" />}
+              Salvar
+            </button>
+          </div>
         </div>
       </section>
     </div>

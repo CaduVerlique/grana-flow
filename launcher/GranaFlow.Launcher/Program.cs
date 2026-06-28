@@ -61,7 +61,7 @@ try
             SaveState(launcherStatePath, state);
         }
 
-        RunSmokeTest(nodeExePath, appRoot, logsDir, userEnvPath);
+        RunSmokeTest(nodeExePath, appRoot, logsDir, userEnvPath, launcherExePath, installRoot, configRoot);
         return;
     }
 
@@ -78,7 +78,7 @@ try
     state.AppReleaseTag = currentReleaseTag;
     state.RuntimeReleaseTag = currentReleaseTag;
 
-    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, state.Port, userEnvPath);
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, state.Port, userEnvPath, launcherExePath, installRoot, configRoot);
     state.ServerProcessId = serverProcess.Id;
     SaveState(launcherStatePath, state);
 
@@ -326,11 +326,11 @@ static void DeleteDirectoryIfExists(string path)
     }
 }
 
-static void RunSmokeTest(string nodeExePath, string appRoot, string logsDir, string userEnvPath)
+static void RunSmokeTest(string nodeExePath, string appRoot, string logsDir, string userEnvPath, string launcherExePath, string installRoot, string configRoot)
 {
     const int smokePort = 8798;
     WriteHeader("Smoke test");
-    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, smokePort, userEnvPath);
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, smokePort, userEnvPath, launcherExePath, installRoot, configRoot);
 
     try
     {
@@ -541,7 +541,7 @@ static string QuoteCliArg(string value)
     return $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
-static Process StartServer(string nodeExePath, string appRoot, string logsDir, int port, string userEnvPath)
+static Process StartServer(string nodeExePath, string appRoot, string logsDir, int port, string userEnvPath, string launcherExePath, string installRoot, string configRoot)
 {
     WriteHeader("Subindo servidor");
     Directory.CreateDirectory(logsDir);
@@ -561,6 +561,9 @@ static Process StartServer(string nodeExePath, string appRoot, string logsDir, i
 
     startInfo.Environment["API_PORT"] = port.ToString();
     startInfo.Environment["GRANAFLOW_CONFIG_ENV_PATH"] = userEnvPath;
+    startInfo.Environment["GRANAFLOW_CONFIG_ROOT"] = configRoot;
+    startInfo.Environment["GRANAFLOW_INSTALL_ROOT"] = installRoot;
+    startInfo.Environment["GRANAFLOW_LAUNCHER_EXE_PATH"] = launcherExePath;
     startInfo.Environment["NODE_ENV"] = "production";
 
     var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Nao foi possivel iniciar o servidor.");

@@ -1,6 +1,8 @@
 import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
+import { tmpdir } from 'node:os'
+import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { URL } from 'node:url'
 import { loadLocalEnv } from './env.mjs'
 
@@ -11,8 +13,10 @@ if (process.env.GRANAFLOW_CONFIG_ENV_PATH) {
 loadLocalEnv()
 
 const apiBase = process.env.PLUGGY_API_BASE ?? 'https://api.pluggy.ai'
+const appName = 'GranaFlow'
 const port = Number(process.env.API_PORT ?? 8787)
 const distDir = resolve(process.cwd(), 'dist')
+const runRegistryKey = String.raw`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -179,9 +183,14 @@ function readJsonBody(request) {
   })
 }
 
-function getConfigStatus() {
+async function getConfigStatus() {
+  const autoStart = await getAutoStartStatus()
+
   return {
     apiPort: port,
+    autoStart: autoStart.enabled,
+    canManageAutoStart: autoStart.manageable,
+    canResetApp: Boolean(process.env.GRANAFLOW_CONFIG_ROOT && process.env.GRANAFLOW_INSTALL_ROOT),
     hasClientId: Boolean(process.env.PLUGGY_CLIENT_ID),
     hasClientSecret: Boolean(process.env.PLUGGY_CLIENT_SECRET),
     hasItemId: Boolean(process.env.PLUGGY_ITEM_ID),
@@ -197,7 +206,7 @@ function maskValue(value) {
   return value.length <= 8 ? '********' : `${value.slice(0, 4)}...${value.slice(-4)}`
 }
 
-function normalizeCredential(value, currentValue, field) {
+function normalizeCredential(value, currentValue) {
   if (typeof value === 'string' && value.trim()) {
     return value.trim()
   }
@@ -206,11 +215,7 @@ function normalizeCredential(value, currentValue, field) {
     return currentValue
   }
 
-  {
-    const error = new Error(`Informe ${field}.`)
-    error.statusCode = 400
-    throw error
-  }
+  return ''
 }
 
 function escapeEnvValue(value) {
@@ -224,9 +229,9 @@ async function writeEnvFile(envPath, envContent) {
 
 async function savePluggyConfig(request) {
   const body = await readJsonBody(request)
-  const clientId = normalizeCredential(body.clientId, process.env.PLUGGY_CLIENT_ID, 'Client ID')
-  const clientSecret = normalizeCredential(body.clientSecret, process.env.PLUGGY_CLIENT_SECRET, 'Client Secret')
-  const itemId = normalizeCredential(body.itemId, process.env.PLUGGY_ITEM_ID, 'Item ID')
+  const clientId = normalizeCredential(body.clientId, process.env.PLUGGY_CLIENT_ID)
+  const clientSecret = normalizeCredential(body.clientSecret, process.env.PLUGGY_CLIENT_SECRET)
+  const itemId = normalizeCredential(body.itemId, process.env.PLUGGY_ITEM_ID)
   const apiPort = String(Number(body.apiPort) || port)
   const envPath = resolve(process.cwd(), '.env.local')
   const envContent = [
@@ -248,7 +253,157 @@ async function savePluggyConfig(request) {
   process.env.PLUGGY_ITEM_ID = itemId
   process.env.API_PORT = apiPort
 
+  if (typeof body.autoStart === 'boolean' && process.env.GRANAFLOW_LAUNCHER_EXE_PATH) {
+    await setAutoStart(body.autoStart)
+  }
+
   return getConfigStatus()
+}
+
+function runCommand(file, args, { allowFailure = false } = {}) {
+  return new Promise((resolveCommand, reject) => {
+    const child = spawn(file, args, {
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0 || allowFailure) {
+        resolveCommand({ code, stderr, stdout })
+        return
+      }
+
+      const error = new Error(stderr.trim() || `${file} saiu com codigo ${code}.`)
+      error.statusCode = 500
+      reject(error)
+    })
+  })
+}
+
+async function getAutoStartStatus() {
+  const launcherPath = process.env.GRANAFLOW_LAUNCHER_EXE_PATH
+
+  if (process.platform !== 'win32' || !launcherPath) {
+    return { enabled: false, manageable: false }
+  }
+
+  const result = await runCommand('reg.exe', ['query', runRegistryKey, '/v', appName], { allowFailure: true })
+  const normalizedOutput = result.stdout.toLowerCase()
+  const normalizedLauncherPath = launcherPath.toLowerCase()
+
+  return {
+    enabled: result.code === 0 && normalizedOutput.includes(normalizedLauncherPath),
+    manageable: true,
+  }
+}
+
+async function setAutoStart(enabled) {
+  const launcherPath = process.env.GRANAFLOW_LAUNCHER_EXE_PATH
+
+  if (process.platform !== 'win32' || !launcherPath) {
+    const error = new Error('Inicio automatico disponivel apenas pelo executavel do Windows.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (enabled) {
+    await runCommand('reg.exe', ['add', runRegistryKey, '/v', appName, '/t', 'REG_SZ', '/d', `"${launcherPath}"`, '/f'])
+    return
+  }
+
+  await runCommand('reg.exe', ['delete', runRegistryKey, '/v', appName, '/f'], { allowFailure: true })
+}
+
+function getManagedGranaFlowPath(envName, label) {
+  const rawPath = process.env[envName]
+
+  if (!rawPath) {
+    const error = new Error(`${label} nao esta disponivel nesta execucao.`)
+    error.statusCode = 400
+    throw error
+  }
+
+  const managedPath = resolve(rawPath)
+
+  if (basename(managedPath).toLowerCase() !== 'granaflow') {
+    const error = new Error(`${label} nao parece ser uma pasta gerenciada do GranaFlow.`)
+    error.statusCode = 400
+    throw error
+  }
+
+  return managedPath
+}
+
+async function createResetScript() {
+  const scriptPath = resolve(tmpdir(), `granaflow-reset-${process.pid}.ps1`)
+  const script = [
+    'param(',
+    '  [int]$ParentPid,',
+    '  [string]$ConfigRoot,',
+    '  [string]$InstallRoot',
+    ')',
+    '$ErrorActionPreference = "SilentlyContinue"',
+    'try { Wait-Process -Id $ParentPid -Timeout 20 } catch {}',
+    'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "GranaFlow" /f | Out-Null',
+    'if ($ConfigRoot) { Remove-Item -LiteralPath $ConfigRoot -Recurse -Force -ErrorAction SilentlyContinue }',
+    'if ($InstallRoot) { Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue }',
+    'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
+    '',
+  ].join('\r\n')
+
+  await writeFile(scriptPath, script, 'utf8')
+  return scriptPath
+}
+
+async function resetUserData() {
+  const configRoot = getManagedGranaFlowPath('GRANAFLOW_CONFIG_ROOT', 'Pasta de configuracao')
+  const installRoot = getManagedGranaFlowPath('GRANAFLOW_INSTALL_ROOT', 'Pasta local')
+  const scriptPath = await createResetScript()
+
+  await setAutoStart(false).catch(() => undefined)
+  const child = spawn('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    scriptPath,
+    '-ParentPid',
+    String(process.pid),
+    '-ConfigRoot',
+    configRoot,
+    '-InstallRoot',
+    installRoot,
+  ], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+
+  child.unref()
+  closeServerSoon()
+
+  return { ok: true }
+}
+
+function shutdownApp() {
+  closeServerSoon()
+
+  return { ok: true }
+}
+
+function closeServerSoon() {
+  setTimeout(() => {
+    server.close(() => process.exit(0))
+    setTimeout(() => process.exit(0), 1500).unref()
+  }, 250).unref()
 }
 
 function getConfig() {
@@ -941,12 +1096,22 @@ const server = createServer(async (request, response) => {
     }
 
     if (requestUrl.pathname === '/api/config' && request.method === 'GET') {
-      json(response, 200, getConfigStatus())
+      json(response, 200, await getConfigStatus())
       return
     }
 
     if (requestUrl.pathname === '/api/config' && request.method === 'POST') {
       json(response, 200, await savePluggyConfig(request))
+      return
+    }
+
+    if (requestUrl.pathname === '/api/app/reset' && request.method === 'POST') {
+      json(response, 200, await resetUserData())
+      return
+    }
+
+    if (requestUrl.pathname === '/api/app/shutdown' && request.method === 'POST') {
+      json(response, 200, shutdownApp())
       return
     }
 
