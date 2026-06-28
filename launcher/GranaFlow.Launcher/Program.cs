@@ -1,11 +1,16 @@
 using System.Diagnostics;
 using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Win32;
 
 const string AppName = "GranaFlow";
+const string RepoFullName = "CaduVerlique/grana-flow";
 const string RepoUrl = "https://github.com/CaduVerlique/grana-flow.git";
+const string LatestReleaseApiUrl = "https://api.github.com/repos/" + RepoFullName + "/releases/latest";
+const string ReleaseAssetName = "GranaFlow.exe";
 
 var skipUpdate = args.Any((arg) => arg.Equals("--skip-update", StringComparison.OrdinalIgnoreCase));
 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -17,6 +22,7 @@ var launcherStatePath = Path.Combine(configRoot, "launcher.json");
 var envPath = Path.Combine(appRoot, ".env.local");
 var logsDir = Path.Combine(configRoot, "logs");
 var launcherExePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
+var currentReleaseTag = GetCurrentReleaseTag();
 
 Directory.CreateDirectory(configRoot);
 Directory.CreateDirectory(logsDir);
@@ -26,38 +32,31 @@ Console.Title = AppName;
 
 try
 {
-    WriteHeader("Inicializando");
-    EnsureTool("git", "Git e necessario para instalar/atualizar o GranaFlow.");
-    EnsureTool("node", "Node.js e necessario para rodar o GranaFlow.");
-    EnsureTool("npm", "npm e necessario para instalar dependencias do GranaFlow.");
-
+    WriteHeader($"Inicializando {currentReleaseTag}");
     var state = LoadState(launcherStatePath);
     KillPreviousServer(state);
 
+    if (!skipUpdate && TryUpdateLauncher(launcherExePath, currentReleaseTag))
+    {
+        SaveState(launcherStatePath, state);
+        return;
+    }
+
+    EnsureTool("git", "Git e necessario para instalar a versao do app vinculada a release.");
+    EnsureTool("node", "Node.js e necessario para rodar o GranaFlow.");
+    EnsureTool("npm", "npm e necessario para instalar dependencias do GranaFlow.");
+
     EnsureRepository(appRoot);
+    var appChanged = SyncRepositoryToRelease(appRoot, currentReleaseTag);
 
     if (IsFirstRun(state, envPath))
     {
         state = PromptFirstRun(state, envPath, launcherExePath);
     }
 
-    if (!skipUpdate && TryUpdate(appRoot))
-    {
-        WriteHeader("Atualizacao aplicada");
-        EnsureNodeDependencies(appRoot);
-        Run("npm", "run build", appRoot, "Gerando build atualizado");
-        SaveState(launcherStatePath, state);
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = launcherExePath,
-            UseShellExecute = true,
-            Arguments = "--skip-update",
-        });
-        return;
-    }
-
-    EnsureNodeDependencies(appRoot);
+    EnsureNodeDependencies(appRoot, appChanged || !currentReleaseTag.Equals(state.AppReleaseTag, StringComparison.OrdinalIgnoreCase));
     Run("npm", "run build", appRoot, "Gerando build de producao");
+    state.AppReleaseTag = currentReleaseTag;
 
     var serverProcess = StartServer(appRoot, logsDir, state.Port);
     state.ServerProcessId = serverProcess.Id;
@@ -141,41 +140,219 @@ static void EnsureRepository(string appRoot)
     Run("git", $"clone {RepoUrl} \"{appRoot}\"", Path.GetDirectoryName(appRoot)!, "Clonando repositorio");
 }
 
-static bool TryUpdate(string appRoot)
+static bool SyncRepositoryToRelease(string appRoot, string releaseTag)
 {
     if (!Directory.Exists(Path.Combine(appRoot, ".git")))
     {
-        Console.WriteLine("Repositorio Git nao encontrado; pulando update automatico.");
+        Console.WriteLine("Repositorio Git nao encontrado; usando arquivos locais do app.");
         return false;
     }
 
-    WriteHeader("Checando updates");
-    Run("git", "fetch --prune", appRoot, "Buscando updates");
+    WriteHeader("Sincronizando app");
+    Run("git", "fetch --tags --prune origin", appRoot, "Buscando tags da release");
 
-    var current = Capture("git", "rev-parse HEAD", appRoot).Trim();
-    var upstream = Capture("git", "rev-parse @{u}", appRoot, allowFailure: true).Trim();
-
-    if (string.IsNullOrWhiteSpace(upstream))
+    var currentTag = Capture("git", "describe --tags --exact-match", appRoot, allowFailure: true).Trim();
+    if (releaseTag.Equals(currentTag, StringComparison.OrdinalIgnoreCase))
     {
-        upstream = Capture("git", "rev-parse origin/main", appRoot, allowFailure: true).Trim();
-    }
-
-    if (string.IsNullOrWhiteSpace(upstream) || current.Equals(upstream, StringComparison.OrdinalIgnoreCase))
-    {
-        Console.WriteLine("Nenhum update encontrado.");
+        Console.WriteLine($"App ja esta na release {releaseTag}.");
         return false;
     }
 
-    Run("git", "pull --ff-only", appRoot, "Baixando update");
+    Run("git", $"checkout tags/{releaseTag}", appRoot, $"Aplicando release {releaseTag}");
     return true;
 }
 
-static void EnsureNodeDependencies(string appRoot)
+static bool TryUpdateLauncher(string launcherExePath, string currentReleaseTag)
 {
-    if (!Directory.Exists(Path.Combine(appRoot, "node_modules")))
+    if (string.IsNullOrWhiteSpace(launcherExePath) || !File.Exists(launcherExePath))
     {
-        Run("npm", "install", appRoot, "Instalando dependencias");
+        Console.WriteLine("Nao foi possivel localizar o executavel atual; pulando update automatico.");
+        return false;
     }
+
+    WriteHeader("Checando releases");
+    var latestRelease = FetchLatestRelease();
+
+    if (latestRelease is null || string.IsNullOrWhiteSpace(latestRelease.TagName))
+    {
+        Console.WriteLine("Nao foi possivel consultar a ultima release agora.");
+        return false;
+    }
+
+    if (!IsNewerRelease(latestRelease.TagName, currentReleaseTag))
+    {
+        Console.WriteLine($"Nenhuma release nova encontrada. Atual: {currentReleaseTag}.");
+        return false;
+    }
+
+    var asset = latestRelease.Assets?.FirstOrDefault((item) => item.Name.Equals(ReleaseAssetName, StringComparison.OrdinalIgnoreCase));
+    if (asset is null || string.IsNullOrWhiteSpace(asset.BrowserDownloadUrl))
+    {
+        throw new InvalidOperationException($"Release {latestRelease.TagName} nao tem o asset {ReleaseAssetName}.");
+    }
+
+    Console.WriteLine($"Nova release encontrada: {latestRelease.TagName}. Baixando executavel...");
+    var updateDir = Path.Combine(Path.GetTempPath(), AppName, "updates");
+    Directory.CreateDirectory(updateDir);
+
+    var downloadedExePath = Path.Combine(updateDir, $"{AppName}-{SanitizeFileName(latestRelease.TagName)}.exe");
+    DownloadFile(asset.BrowserDownloadUrl, downloadedExePath);
+    StartSelfUpdater(downloadedExePath, launcherExePath);
+
+    Console.WriteLine("Update baixado. O GranaFlow vai reiniciar com a nova versao.");
+    return true;
+}
+
+static void EnsureNodeDependencies(string appRoot, bool force)
+{
+    if (force || !Directory.Exists(Path.Combine(appRoot, "node_modules")))
+    {
+        Run("npm", "install", appRoot, "Conferindo dependencias");
+    }
+}
+
+static ReleaseInfo? FetchLatestRelease()
+{
+    using var client = CreateGitHubClient();
+    try
+    {
+        using var response = client.GetAsync(LatestReleaseApiUrl).GetAwaiter().GetResult();
+        if (!response.IsSuccessStatusCode)
+        {
+            Console.WriteLine($"GitHub respondeu {(int)response.StatusCode} ao consultar releases.");
+            return null;
+        }
+
+        var payload = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        return JsonSerializer.Deserialize<ReleaseInfo>(payload);
+    }
+    catch (Exception error)
+    {
+        Console.WriteLine($"Nao foi possivel consultar releases: {error.Message}");
+        return null;
+    }
+}
+
+static void DownloadFile(string url, string destinationPath)
+{
+    using var client = CreateGitHubClient();
+    using var response = client.GetAsync(url).GetAwaiter().GetResult();
+    response.EnsureSuccessStatusCode();
+
+    using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+    response.Content.CopyToAsync(destination).GetAwaiter().GetResult();
+
+    if (new FileInfo(destinationPath).Length < 1_000_000)
+    {
+        throw new InvalidOperationException("Download do executavel parece incompleto.");
+    }
+}
+
+static HttpClient CreateGitHubClient()
+{
+    var client = new HttpClient();
+    client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+    client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", $"{AppName}-launcher");
+    return client;
+}
+
+static bool IsNewerRelease(string latestTag, string currentTag)
+{
+    if (TryParseReleaseVersion(latestTag, out var latestVersion) && TryParseReleaseVersion(currentTag, out var currentVersion))
+    {
+        return latestVersion.CompareTo(currentVersion) > 0;
+    }
+
+    return !latestTag.Equals(currentTag, StringComparison.OrdinalIgnoreCase);
+}
+
+static bool TryParseReleaseVersion(string tag, out Version version)
+{
+    var normalized = tag.Trim().TrimStart('v', 'V');
+    var suffixIndex = normalized.IndexOfAny(new[] { '-', '+' });
+    if (suffixIndex >= 0)
+    {
+        normalized = normalized[..suffixIndex];
+    }
+
+    return Version.TryParse(normalized, out version!);
+}
+
+static void StartSelfUpdater(string downloadedExePath, string launcherExePath)
+{
+    var updateDir = Path.GetDirectoryName(downloadedExePath)!;
+    var scriptPath = Path.Combine(updateDir, "apply-update.ps1");
+    File.WriteAllText(scriptPath, """
+param(
+    [int]$ParentPid,
+    [string]$Source,
+    [string]$Target,
+    [string]$Arguments
+)
+
+$ErrorActionPreference = 'Stop'
+try {
+    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+} catch {}
+
+Start-Sleep -Milliseconds 700
+Copy-Item -LiteralPath $Source -Destination $Target -Force
+Start-Process -FilePath $Target -ArgumentList $Arguments
+""", Encoding.UTF8);
+
+    var arguments = string.Join(" ", new[]
+    {
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        QuoteCliArg(scriptPath),
+        "-ParentPid",
+        Environment.ProcessId.ToString(),
+        "-Source",
+        QuoteCliArg(downloadedExePath),
+        "-Target",
+        QuoteCliArg(launcherExePath),
+        "-Arguments",
+        QuoteCliArg("--skip-update"),
+    });
+
+    Process.Start(new ProcessStartInfo
+    {
+        FileName = "powershell.exe",
+        Arguments = arguments,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        WindowStyle = ProcessWindowStyle.Hidden,
+    });
+}
+
+static string GetCurrentReleaseTag()
+{
+    var version = Assembly.GetExecutingAssembly()
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+        ?.InformationalVersion
+        .Split('+')[0]
+        .Trim();
+
+    return string.IsNullOrWhiteSpace(version) ? "v0.0.0" : $"v{version.TrimStart('v', 'V')}";
+}
+
+static string SanitizeFileName(string value)
+{
+    var invalidChars = Path.GetInvalidFileNameChars();
+    var builder = new StringBuilder(value.Length);
+    foreach (var character in value)
+    {
+        builder.Append(invalidChars.Contains(character) ? '-' : character);
+    }
+
+    return builder.ToString();
+}
+
+static string QuoteCliArg(string value)
+{
+    return $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
 static Process StartServer(string appRoot, string logsDir, int port)
@@ -459,8 +636,27 @@ static void WriteHeader(string title)
 
 internal sealed class LauncherState
 {
+    public string? AppReleaseTag { get; set; }
     public bool AutoStart { get; set; }
     public bool FirstRun { get; set; } = true;
     public int Port { get; set; } = 8787;
     public int? ServerProcessId { get; set; }
+}
+
+internal sealed class ReleaseInfo
+{
+    [JsonPropertyName("tag_name")]
+    public string TagName { get; set; } = string.Empty;
+
+    [JsonPropertyName("assets")]
+    public List<ReleaseAsset> Assets { get; set; } = [];
+}
+
+internal sealed class ReleaseAsset
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("browser_download_url")]
+    public string BrowserDownloadUrl { get; set; } = string.Empty;
 }

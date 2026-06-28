@@ -82,7 +82,9 @@ O arquivo sai em `release/win-x64/GranaFlow.exe`.
 Ao abrir, o launcher:
 
 - encerra uma execucao anterior iniciada por ele;
-- clona ou atualiza `https://github.com/CaduVerlique/grana-flow.git`;
+- consulta a ultima GitHub Release e atualiza o proprio `GranaFlow.exe` quando houver versao nova;
+- clona `https://github.com/CaduVerlique/grana-flow.git` quando necessario;
+- sincroniza o app local com a mesma tag da release do executavel;
 - instala dependencias quando necessario;
 - gera o build de producao;
 - no primeiro uso pergunta porta, credenciais Pluggy e auto-inicio com o Windows;
