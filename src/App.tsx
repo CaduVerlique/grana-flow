@@ -10,6 +10,7 @@ import {
   CreditCard,
   Landmark,
   LoaderCircle,
+  Minus,
   PiggyBank,
   RefreshCw,
   Save,
@@ -42,12 +43,18 @@ type IconComponent = ComponentType<SVGProps<SVGSVGElement>>
 type Metric = {
   label: string
   value: string
-  detail: string
+  detail: MetricComparison
   icon: IconComponent
   progress?: number
   progressTone?: 'good' | 'bad'
   support?: ReactNode
   tone: 'shield' | 'mint' | 'amber' | 'rose'
+}
+
+type MetricComparison = {
+  label: string
+  sentiment: 'negative' | 'neutral' | 'positive'
+  trend: 'down' | 'flat' | 'up'
 }
 
 type SnapshotError = {
@@ -160,22 +167,31 @@ function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string) {
 
 function getMetricComparison(current: number, previous?: number, mode: 'higher-is-bad' | 'higher-is-good' = 'higher-is-bad') {
   if (previous === undefined || previous === null) {
-    return 'Sem comparativo'
+    return {
+      label: 'Sem comparativo',
+      sentiment: 'neutral',
+      trend: 'flat',
+    } satisfies MetricComparison
   }
 
   const difference = current - previous
   if (Math.abs(difference) < 0.01) {
-    return 'Igual ao mês anterior'
+    return {
+      label: 'Igual ao mês anterior',
+      sentiment: 'neutral',
+      trend: 'flat',
+    } satisfies MetricComparison
   }
 
-  const direction = difference > 0 ? 'acima' : 'abaixo'
+  const trend = difference > 0 ? 'up' : 'down'
   const absolute = formatCompactMoney(Math.abs(difference))
+  const isPositive = mode === 'higher-is-good' ? difference > 0 : difference < 0
 
-  if (mode === 'higher-is-good') {
-    return `${absolute} ${difference > 0 ? 'acima' : 'abaixo'} do mês anterior`
-  }
-
-  return `${absolute} ${direction} do mês anterior`
+  return {
+    label: `${absolute} ${difference > 0 ? 'acima' : 'abaixo'} do mês anterior`,
+    sentiment: isPositive ? 'positive' : 'negative',
+    trend,
+  } satisfies MetricComparison
 }
 
 function App() {
@@ -275,7 +291,7 @@ function App() {
   const expenses = summary?.expenses ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
   const monthProgress = getMonthProgress(dateFrom)
-  const limitUsage = Math.min((expenses / monthlyLimit) * 100, 100)
+  const limitUsage = monthlyLimit > 0 ? (expenses / monthlyLimit) * 100 : 0
   const remainingLimit = monthlyLimit - expenses
   const daysUntilMonthEnd = getDaysUntilMonthEnd(dateFrom)
   const categories = summary?.categories ?? []
@@ -425,12 +441,16 @@ function App() {
       <header className="shrink-0 border-b border-[#17231f] bg-[#0a0f0d]">
         <div className="mx-auto flex max-w-[1560px] flex-col gap-5 px-4 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div className="flex items-center gap-3">
-            <div className="grid size-12 place-items-center rounded-lg border border-[#256c52] bg-[#103b2f] text-[#42f08f] shadow-[0_0_32px_rgba(33,181,112,0.25)]">
-              <ShieldCheck className="size-7" aria-hidden="true" />
+            <div className="flex h-14 items-center rounded-lg border border-[#1f3f33] bg-[#050806] px-3 shadow-[0_0_34px_rgba(30,188,112,0.18),inset_0_1px_0_rgba(255,255,255,0.05)]">
+              <img
+                alt="GranaFlow"
+                className="h-10 w-auto max-w-[210px] object-contain sm:h-11 sm:max-w-[250px]"
+                src="/granaflow-logo.png"
+              />
             </div>
-            <div>
-              <h1 className="text-2xl font-semibold text-white">GranaFlow</h1>
-              <p className="text-base text-[#8ba397]">Open Finance no modo cabine de comando</p>
+            <div className="hidden min-w-0 sm:block">
+              <h1 className="sr-only">GranaFlow</h1>
+              <p className="text-sm font-medium text-[#8ba397]">Open Finance no modo cabine de comando</p>
             </div>
           </div>
 
@@ -750,9 +770,7 @@ function AnnualView() {
   )
   const selectedMonth = annualPlan.months.find((month) => month.key === selectedMonthKey) ?? annualPlan.months.find((month) => month.key === defaultSelectedMonthKey) ?? null
   const currentGrossAmount = (annual?.current.accountBalance ?? 0) + (annual?.current.investmentBalance ?? 0)
-  const projectedInvestmentDecember =
-    (annual?.current.investmentBalance ?? 0) +
-    annualPlan.months.reduce((sum, month) => sum + (month.isFuture ? month.projectedInvestment : 0), 0)
+  const projectedInvestmentDecember = annualPlan.projectedInvestmentTotal
 
   useEffect(() => {
     if (!defaultSelectedMonthKey) {
@@ -809,10 +827,10 @@ function AnnualView() {
             </div>
 
             <div className="hidden min-w-0 grid-cols-4 gap-2 xl:grid">
-              <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="mint" />
-              <AnnualTopMetric label="Investimento atual" value={formatCompactMoney(annual?.current.investmentBalance ?? 0)} tone="shield" />
-              <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="rose" />
-              <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="amber" />
+              <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="violet" />
+              <AnnualTopMetric label="Investimento atual" value={formatCompactMoney(annual?.current.investmentBalance ?? 0)} tone="cyan" />
+              <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="red" />
+              <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="green" />
             </div>
 
             <div className="relative flex shrink-0 items-start gap-2">
@@ -1125,18 +1143,28 @@ function AnnualTopMetric({
   value,
 }: {
   label: string
-  tone: 'amber' | 'mint' | 'rose' | 'shield'
+  tone: 'amber' | 'blue' | 'cyan' | 'green' | 'red' | 'violet'
   value: string
 }) {
   const toneClass = {
-    amber: 'text-[#ffc46b]',
-    mint: 'text-[#75f4dc]',
-    rose: 'text-[#ff8d8d]',
-    shield: 'text-[#42f08f]',
+    amber: 'text-[#ffd166]',
+    blue: 'text-[#4aa3ff]',
+    cyan: 'text-[#67e8f9]',
+    green: 'text-[#42f08f]',
+    red: 'text-[#ff5f64]',
+    violet: 'text-[#a78bfa]',
+  }[tone]
+  const borderClass = {
+    amber: 'border-[#5b4720]/80',
+    blue: 'border-[#244b7a]/80',
+    cyan: 'border-[#1e5760]/80',
+    green: 'border-[#256c52]/80',
+    red: 'border-[#633033]/80',
+    violet: 'border-[#4d3d7d]/80',
   }[tone]
 
   return (
-    <div className="min-w-28 rounded-lg border border-[#244438] bg-[#0d1512]/92 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className={`min-w-28 rounded-lg border bg-[#0d1512]/92 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${borderClass}`}>
       <p className="truncate text-xs font-semibold uppercase text-[#6f897c]">{label}</p>
       <p className={`mt-1 truncate text-lg font-semibold ${toneClass}`}>{value}</p>
     </div>
@@ -1646,19 +1674,19 @@ function AnnualMonthFocus({
           <AnnualFocusMetric
             label="Gasto realizado"
             value={month.isFuture ? '-' : formatMoney(month.summary.expenses)}
-            tone="rose"
+            tone="red"
           />
           <AnnualFocusMetric
             label="Investido real"
             value={month.isFuture ? '-' : formatMoney(month.summary.netInvestmentContribution)}
-            tone={month.summary.netInvestmentContribution >= 0 ? 'shield' : 'amber'}
+            tone={month.summary.netInvestmentContribution >= 0 ? 'green' : 'amber'}
           />
-          <AnnualFocusMetric label="Gasto projetado" value={formatMoney(month.projectedExpense)} tone="light" />
-          <AnnualFocusMetric label="Invest. projetado" value={formatMoney(month.projectedInvestment)} tone="mint" />
+          <AnnualFocusMetric label="Gasto projetado" value={formatMoney(month.projectedExpense)} tone="red" />
+          <AnnualFocusMetric label="Invest. projetado" value={formatMoney(month.projectedInvestment)} tone="green" />
           <AnnualFocusMetric
             label={month.projectedBalance === null ? 'Saldo atual' : 'Saldo projetado'}
             value={formatMoney(month.projectedBalance ?? currentNetBalance)}
-            tone="light"
+            tone="violet"
           />
         </div>
       </div>
@@ -1672,15 +1700,17 @@ function AnnualFocusMetric({
   value,
 }: {
   label: string
-  tone: 'amber' | 'light' | 'mint' | 'rose' | 'shield'
+  tone: 'amber' | 'blue' | 'cyan' | 'green' | 'light' | 'red' | 'violet'
   value: string
 }) {
   const toneClass = {
-    amber: 'text-[#ffc46b]',
+    amber: 'text-[#ffd166]',
+    blue: 'text-[#4aa3ff]',
+    cyan: 'text-[#67e8f9]',
+    green: 'text-[#42f08f]',
     light: 'text-white',
-    mint: 'text-[#75f4dc]',
-    rose: 'text-[#ff8d8d]',
-    shield: 'text-[#42f08f]',
+    red: 'text-[#ff5f64]',
+    violet: 'text-[#a78bfa]',
   }[tone]
 
   return (
@@ -1834,6 +1864,14 @@ function FilterSelect({
 
 function MetricCard({ metric }: { metric: Metric }) {
   const Icon = metric.icon
+  const ComparisonIcon =
+    metric.detail.trend === 'up' ? ArrowUpRight : metric.detail.trend === 'down' ? ArrowDownRight : Minus
+  const comparisonTone = {
+    negative: 'text-[#ff8d8d]',
+    neutral: 'text-[#8ba397]',
+    positive: 'text-[#42f08f]',
+  }[metric.detail.sentiment]
+  const progressWidth = metric.progress === undefined ? 0 : Math.min(Math.max(metric.progress, 0), 100)
   const tone = {
     amber: 'border-[#5a3d1d] bg-[#2a1c0d] text-[#ffc46b]',
     mint: 'border-[#24544b] bg-[#102824] text-[#75f4dc]',
@@ -1857,19 +1895,15 @@ function MetricCard({ metric }: { metric: Metric }) {
           <div className="h-3 overflow-hidden rounded-full bg-[#17231f]">
             <div
               className={`h-full rounded-full ${metric.progressTone === 'bad' ? 'bg-[#ff6b6b]' : 'bg-[#42f08f]'}`}
-              style={{ width: `${metric.progress}%` }}
+              style={{ width: `${progressWidth}%` }}
             />
           </div>
         </div>
       ) : null}
       {metric.support}
-      <div className="mt-5 flex items-center gap-1 text-base text-[#8ba397]">
-        {metric.tone === 'rose' ? (
-          <ArrowDownRight className="size-4 text-[#ff8d8d]" aria-hidden="true" />
-        ) : (
-          <ArrowUpRight className="size-4 text-[#42f08f]" aria-hidden="true" />
-        )}
-        {metric.detail}
+      <div className={`mt-5 flex items-center gap-1 text-base ${comparisonTone}`}>
+        <ComparisonIcon className="size-4" aria-hidden="true" />
+        <span className={metric.detail.sentiment === 'neutral' ? 'text-[#8ba397]' : undefined}>{metric.detail.label}</span>
       </div>
     </article>
   )
