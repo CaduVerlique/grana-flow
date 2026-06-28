@@ -17,6 +17,7 @@ npm install
 npm run dev
 npm run build
 npm run lint
+npm run release:win
 ```
 
 ## Pluggy
@@ -67,3 +68,24 @@ Transferências negativas entram no orçamento, porque podem ser pagamentos por 
 Investimentos são exibidos pelo saldo da carteira retornado pela Pluggy, não pelo fluxo de transações do mês.
 
 Compras em moeda estrangeira usam o valor `amountInAccountCurrency` quando a Pluggy informa a conversão para BRL. Se esse campo não vier, o backend tenta converter pela PTAX do Banco Central na data da compra.
+
+## Release Windows
+
+Gere o executavel local com:
+
+```bash
+npm run release:win
+```
+
+O arquivo sai em `release/win-x64/GranaFlow.exe`.
+
+Ao abrir, o launcher:
+
+- encerra uma execucao anterior iniciada por ele;
+- clona ou atualiza `https://github.com/CaduVerlique/grana-flow.git`;
+- instala dependencias quando necessario;
+- gera o build de producao;
+- no primeiro uso pergunta porta, credenciais Pluggy e auto-inicio com o Windows;
+- inicia o servidor local e abre o navegador padrao.
+
+Requisitos desta versao: Git, Node.js e npm instalados no Windows.

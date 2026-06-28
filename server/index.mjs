@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
-import { writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { readFile, writeFile } from 'node:fs/promises'
+import { extname, isAbsolute, relative, resolve } from 'node:path'
 import { URL } from 'node:url'
 import { loadLocalEnv } from './env.mjs'
 
@@ -8,6 +8,19 @@ loadLocalEnv()
 
 const apiBase = process.env.PLUGGY_API_BASE ?? 'https://api.pluggy.ai'
 const port = Number(process.env.API_PORT ?? 8787)
+const distDir = resolve(process.cwd(), 'dist')
+
+const mimeTypes = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.webp': 'image/webp',
+}
 
 const categoryLabels = {
   Automotive: 'Automotivo',
@@ -66,10 +79,66 @@ function json(response, status, data) {
   response.writeHead(status, {
     'Access-Control-Allow-Origin': 'http://127.0.0.1:5173',
     'Access-Control-Allow-Headers': 'Content-Type, X-API-KEY',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS, POST',
     'Content-Type': 'application/json; charset=utf-8',
   })
   response.end(body)
+}
+
+async function serveStatic(request, response, requestUrl) {
+  if (!['GET', 'HEAD'].includes(request.method ?? '') || requestUrl.pathname.startsWith('/api/')) {
+    return false
+  }
+
+  const pathname = decodeURIComponent(requestUrl.pathname)
+  const candidatePath = pathname === '/' ? resolve(distDir, 'index.html') : resolve(distDir, `.${pathname}`)
+  const relativePath = relative(distDir, candidatePath)
+
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+    response.end('Acesso negado.')
+    return true
+  }
+
+  const filePath = await findStaticFile(candidatePath, pathname)
+
+  if (!filePath) {
+    response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+    response.end('Build do frontend nao encontrado. Rode npm run build.')
+    return true
+  }
+
+  const content = await readFile(filePath)
+  const extension = extname(filePath).toLowerCase()
+  const isIndex = filePath.endsWith('index.html')
+
+  response.writeHead(200, {
+    'Cache-Control': isIndex ? 'no-cache' : 'public, max-age=31536000, immutable',
+    'Content-Type': mimeTypes[extension] ?? 'application/octet-stream',
+  })
+
+  response.end(request.method === 'HEAD' ? undefined : content)
+  return true
+}
+
+async function findStaticFile(candidatePath, pathname) {
+  try {
+    await readFile(candidatePath)
+    return candidatePath
+  } catch {
+    if (extname(pathname)) {
+      return null
+    }
+  }
+
+  const indexPath = resolve(distDir, 'index.html')
+
+  try {
+    await readFile(indexPath)
+    return indexPath
+  } catch {
+    return null
+  }
 }
 
 function readJsonBody(request) {
@@ -875,6 +944,10 @@ const server = createServer(async (request, response) => {
 
     if (requestUrl.pathname === '/api/pluggy/annual') {
       json(response, 200, await getAnnualSnapshot(requestUrl))
+      return
+    }
+
+    if (await serveStatic(request, response, requestUrl)) {
       return
     }
 

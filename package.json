@@ -9,7 +9,8 @@
     "dev:client": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "release:win": "node scripts/build-release.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.21.0",
