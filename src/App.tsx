@@ -29,8 +29,6 @@ import {
   formatDateTime,
   formatMoney,
   getCurrentMonthRange,
-  getDaysInMonth,
-  getElapsedDays,
   getMonthName,
   type AnnualSnapshot,
   type CategorySummary,
@@ -125,6 +123,25 @@ function getDaysUntilMonthEnd(dateFrom: string) {
   return Math.max(Math.ceil((monthEnd.getTime() - todayStart.getTime()) / 86_400_000), 0)
 }
 
+function getMonthProgress(dateFrom: string) {
+  const today = new Date()
+  const year = Number(dateFrom.slice(0, 4))
+  const monthIndex = Number(dateFrom.slice(5, 7)) - 1
+  const monthStart = new Date(year, monthIndex, 1)
+  const monthEnd = new Date(year, monthIndex + 1, 0)
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+  if (todayStart < monthStart) {
+    return 0
+  }
+
+  if (todayStart > monthEnd) {
+    return 100
+  }
+
+  return Math.min((todayStart.getDate() / monthEnd.getDate()) * 100, 100)
+}
+
 function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string) {
   if (preset === 'current-month') {
     return getMonthName(dateFrom)
@@ -148,17 +165,17 @@ function getMetricComparison(current: number, previous?: number, mode: 'higher-i
 
   const difference = current - previous
   if (Math.abs(difference) < 0.01) {
-    return 'Igual ao mÃªs anterior'
+    return 'Igual ao mês anterior'
   }
 
   const direction = difference > 0 ? 'acima' : 'abaixo'
   const absolute = formatCompactMoney(Math.abs(difference))
 
   if (mode === 'higher-is-good') {
-    return `${absolute} ${difference > 0 ? 'acima' : 'abaixo'} do mÃªs anterior`
+    return `${absolute} ${difference > 0 ? 'acima' : 'abaixo'} do mês anterior`
   }
 
-  return `${absolute} ${direction} do mÃªs anterior`
+  return `${absolute} ${direction} do mês anterior`
 }
 
 function App() {
@@ -257,9 +274,7 @@ function App() {
   const previousSummary = previousSnapshot?.summary
   const expenses = summary?.expenses ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
-  const elapsedDays = getElapsedDays(dateFrom, dateTo)
-  const daysInMonth = getDaysInMonth(dateTo)
-  const monthProgress = Math.min((elapsedDays / daysInMonth) * 100, 100)
+  const monthProgress = getMonthProgress(dateFrom)
   const limitUsage = Math.min((expenses / monthlyLimit) * 100, 100)
   const remainingLimit = monthlyLimit - expenses
   const daysUntilMonthEnd = getDaysUntilMonthEnd(dateFrom)
@@ -305,14 +320,14 @@ function App() {
 
   const metrics: Metric[] = [
     {
-      label: 'Gastos em crÃ©dito',
+      label: 'Gastos em crédito',
       value: formatMoney(summary?.cardExpenses ?? 0),
       detail: getMetricComparison(summary?.cardExpenses ?? 0, previousSummary?.cardExpenses),
       icon: CreditCard,
       tone: 'rose',
     },
     {
-      label: 'Gastos em dÃ©bito',
+      label: 'Gastos em débito',
       value: formatMoney(summary?.bankExpenses ?? 0),
       detail: getMetricComparison(summary?.bankExpenses ?? 0, previousSummary?.bankExpenses),
       icon: Landmark,
@@ -343,7 +358,7 @@ function App() {
             />
           </div>
           <p className={`mt-2 text-sm font-semibold ${remainingLimit >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'}`}>
-            {Math.round(limitUsage)}% usado Â· {remainingLimit >= 0 ? 'restam ' : 'passou '}
+            {Math.round(limitUsage)}% usado · {remainingLimit >= 0 ? 'restam ' : 'passou '}
             {formatCompactMoney(Math.abs(remainingLimit))}
           </p>
         </div>
@@ -561,10 +576,10 @@ function App() {
           <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
             <div className="flex flex-col gap-2 border-b border-[#203a31] p-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h2 className="text-xl font-semibold text-white">MovimentaÃ§Ãµes</h2>
+                <h2 className="text-xl font-semibold text-white">Movimentações</h2>
                 <p className="text-base text-[#8ba397]">
                   Mostrando {recentTransactions.length} de {filteredTransactions.length}
-                  {activeFilterCount ? ` Â· ${activeFilterCount} filtro${activeFilterCount > 1 ? 's' : ''}` : ''}
+                  {activeFilterCount ? ` · ${activeFilterCount} filtro${activeFilterCount > 1 ? 's' : ''}` : ''}
                 </p>
               </div>
               <button
@@ -1480,7 +1495,7 @@ function AnnualSvgTooltip({ tooltip }: { tooltip: AnnualChartTooltip | null }) {
         y={boxY}
       />
       <text fill="#8ba397" fontSize="12" fontWeight="700" x={boxX + 12} y={boxY + 19}>
-        {tooltip.title.toUpperCase()} Â· {tooltip.detail}
+        {tooltip.title.toUpperCase()} · {tooltip.detail}
       </text>
       <text fill={toneClass} fontSize="18" fontWeight="800" x={boxX + 12} y={boxY + 43}>
         {tooltip.value}

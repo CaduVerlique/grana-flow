@@ -1,8 +1,12 @@
 import { createServer } from 'node:http'
-import { readFile, writeFile } from 'node:fs/promises'
-import { extname, isAbsolute, relative, resolve } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { URL } from 'node:url'
 import { loadLocalEnv } from './env.mjs'
+
+if (process.env.GRANAFLOW_CONFIG_ENV_PATH) {
+  loadLocalEnv(process.env.GRANAFLOW_CONFIG_ENV_PATH)
+}
 
 loadLocalEnv()
 
@@ -213,6 +217,11 @@ function escapeEnvValue(value) {
   return value.replace(/\\/g, '\\\\').replace(/\r?\n/g, '').replace(/"/g, '\\"')
 }
 
+async function writeEnvFile(envPath, envContent) {
+  await mkdir(dirname(envPath), { recursive: true })
+  await writeFile(envPath, envContent, 'utf8')
+}
+
 async function savePluggyConfig(request) {
   const body = await readJsonBody(request)
   const clientId = normalizeCredential(body.clientId, process.env.PLUGGY_CLIENT_ID, 'Client ID')
@@ -228,7 +237,11 @@ async function savePluggyConfig(request) {
     '',
   ].join('\n')
 
-  await writeFile(envPath, envContent, 'utf8')
+  await writeEnvFile(envPath, envContent)
+
+  if (process.env.GRANAFLOW_CONFIG_ENV_PATH) {
+    await writeEnvFile(process.env.GRANAFLOW_CONFIG_ENV_PATH, envContent)
+  }
 
   process.env.PLUGGY_CLIENT_ID = clientId
   process.env.PLUGGY_CLIENT_SECRET = clientSecret

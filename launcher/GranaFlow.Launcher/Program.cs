@@ -26,6 +26,7 @@ var runtimeRoot = Path.Combine(installRoot, "runtime");
 var configRoot = Path.Combine(appData, AppName);
 var launcherStatePath = Path.Combine(configRoot, "launcher.json");
 var envPath = Path.Combine(appRoot, ".env.local");
+var userEnvPath = Path.Combine(configRoot, ".env.local");
 var logsDir = Path.Combine(configRoot, "logs");
 var launcherExePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
 var currentReleaseTag = GetCurrentReleaseTag();
@@ -49,32 +50,35 @@ try
     }
 
     var nodeExePath = InstallBundledRuntime(appRoot, runtimeRoot, currentReleaseTag, state);
+    SyncEnvFiles(envPath, userEnvPath);
 
     if (smokeTest)
     {
-        if (!IsFirstRun(state, envPath))
+        if (!IsFirstRun(envPath, userEnvPath))
         {
-            SyncPortFromEnv(state, envPath);
+            SyncPortFromEnv(state, envPath, userEnvPath);
+            state.FirstRun = false;
             SaveState(launcherStatePath, state);
         }
 
-        RunSmokeTest(nodeExePath, appRoot, logsDir);
+        RunSmokeTest(nodeExePath, appRoot, logsDir, userEnvPath);
         return;
     }
 
-    if (IsFirstRun(state, envPath))
+    if (IsFirstRun(envPath, userEnvPath))
     {
-        state = PromptFirstRun(state, envPath, launcherExePath);
+        state = PromptFirstRun(state, envPath, userEnvPath, launcherExePath);
     }
     else
     {
-        SyncPortFromEnv(state, envPath);
+        SyncPortFromEnv(state, envPath, userEnvPath);
+        state.FirstRun = false;
     }
 
     state.AppReleaseTag = currentReleaseTag;
     state.RuntimeReleaseTag = currentReleaseTag;
 
-    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, state.Port);
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, state.Port, userEnvPath);
     state.ServerProcessId = serverProcess.Id;
     SaveState(launcherStatePath, state);
 
@@ -97,9 +101,9 @@ catch (Exception error)
     Console.ReadLine();
 }
 
-static bool IsFirstRun(LauncherState state, string envPath)
+static bool IsFirstRun(string envPath, string userEnvPath)
 {
-    return state.FirstRun || !File.Exists(envPath);
+    return !File.Exists(envPath) && !File.Exists(userEnvPath);
 }
 
 static string GetFolderPath(string overrideVariableName, Environment.SpecialFolder specialFolder)
@@ -108,7 +112,7 @@ static string GetFolderPath(string overrideVariableName, Environment.SpecialFold
     return string.IsNullOrWhiteSpace(overridePath) ? Environment.GetFolderPath(specialFolder) : overridePath;
 }
 
-static LauncherState PromptFirstRun(LauncherState state, string envPath, string launcherExePath)
+static LauncherState PromptFirstRun(LauncherState state, string envPath, string userEnvPath, string launcherExePath)
 {
     WriteHeader("Primeira configuracao");
     Console.WriteLine("Voce pode deixar as credenciais em branco e preencher depois pela UI.");
@@ -120,15 +124,17 @@ static LauncherState PromptFirstRun(LauncherState state, string envPath, string 
     var itemId = Prompt("Pluggy Item ID (opcional)");
     var autoStart = PromptYesNo("Iniciar automaticamente com o Windows?", state.AutoStart);
 
-    Directory.CreateDirectory(Path.GetDirectoryName(envPath)!);
-    File.WriteAllText(envPath, string.Join(Environment.NewLine, new[]
+    var envContent = string.Join(Environment.NewLine, new[]
     {
         $"PLUGGY_CLIENT_ID=\"{EscapeEnv(clientId)}\"",
         $"PLUGGY_CLIENT_SECRET=\"{EscapeEnv(clientSecret)}\"",
         $"PLUGGY_ITEM_ID=\"{EscapeEnv(itemId)}\"",
         $"API_PORT={port}",
         string.Empty,
-    }), Encoding.UTF8);
+    });
+
+    WriteEnvContent(envPath, envContent);
+    WriteEnvContent(userEnvPath, envContent);
 
     SetAutoStart(autoStart, launcherExePath);
 
@@ -138,7 +144,50 @@ static LauncherState PromptFirstRun(LauncherState state, string envPath, string 
     return state;
 }
 
-static void SyncPortFromEnv(LauncherState state, string envPath)
+static void WriteEnvContent(string envPath, string envContent)
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(envPath)!);
+    File.WriteAllText(envPath, envContent, Encoding.UTF8);
+}
+
+static void SyncEnvFiles(string envPath, string userEnvPath)
+{
+    if (File.Exists(envPath) && File.Exists(userEnvPath))
+    {
+        if (File.GetLastWriteTimeUtc(envPath) > File.GetLastWriteTimeUtc(userEnvPath))
+        {
+            MirrorEnvFile(envPath, userEnvPath);
+            return;
+        }
+
+        MirrorEnvFile(userEnvPath, envPath);
+        return;
+    }
+
+    if (File.Exists(userEnvPath))
+    {
+        MirrorEnvFile(userEnvPath, envPath);
+        return;
+    }
+
+    if (File.Exists(envPath))
+    {
+        MirrorEnvFile(envPath, userEnvPath);
+    }
+}
+
+static void MirrorEnvFile(string sourcePath, string targetPath)
+{
+    if (!File.Exists(sourcePath))
+    {
+        return;
+    }
+
+    Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+    File.Copy(sourcePath, targetPath, overwrite: true);
+}
+
+static void SyncPortFromEnv(LauncherState state, string envPath, string userEnvPath)
 {
     var envPort = ReadApiPort(envPath);
     if (envPort is null)
@@ -150,6 +199,7 @@ static void SyncPortFromEnv(LauncherState state, string envPath)
     {
         state.Port = DefaultAppPort;
         WriteApiPort(envPath, DefaultAppPort);
+        MirrorEnvFile(envPath, userEnvPath);
         Console.WriteLine($"Porta padrao migrada de {LegacyDefaultAppPort} para {DefaultAppPort}.");
         return;
     }
@@ -276,11 +326,11 @@ static void DeleteDirectoryIfExists(string path)
     }
 }
 
-static void RunSmokeTest(string nodeExePath, string appRoot, string logsDir)
+static void RunSmokeTest(string nodeExePath, string appRoot, string logsDir, string userEnvPath)
 {
     const int smokePort = 8798;
     WriteHeader("Smoke test");
-    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, smokePort);
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, smokePort, userEnvPath);
 
     try
     {
@@ -491,7 +541,7 @@ static string QuoteCliArg(string value)
     return $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
-static Process StartServer(string nodeExePath, string appRoot, string logsDir, int port)
+static Process StartServer(string nodeExePath, string appRoot, string logsDir, int port, string userEnvPath)
 {
     WriteHeader("Subindo servidor");
     Directory.CreateDirectory(logsDir);
@@ -510,6 +560,7 @@ static Process StartServer(string nodeExePath, string appRoot, string logsDir, i
     };
 
     startInfo.Environment["API_PORT"] = port.ToString();
+    startInfo.Environment["GRANAFLOW_CONFIG_ENV_PATH"] = userEnvPath;
     startInfo.Environment["NODE_ENV"] = "production";
 
     var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Nao foi possivel iniciar o servidor.");
