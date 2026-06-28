@@ -6,6 +6,7 @@ import {
   ArrowUpRight,
   BarChart3,
   Calendar,
+  ChevronDown,
   CreditCard,
   Landmark,
   LoaderCircle,
@@ -45,6 +46,9 @@ type Metric = {
   value: string
   detail: string
   icon: IconComponent
+  progress?: number
+  progressTone?: 'good' | 'bad'
+  support?: ReactNode
   tone: 'shield' | 'mint' | 'amber' | 'rose'
 }
 
@@ -61,7 +65,7 @@ type ConfigStatus = {
   itemIdPreview: string | null
 }
 
-type DatePreset = 'current-month' | 'previous-month' | 'last-n-days' | 'custom'
+type DatePreset = 'current-month' | 'previous-month' | 'next-month' | 'custom'
 type AppView = 'monthly' | 'annual'
 type AnnualGoal = {
   expenseGoal: string
@@ -72,8 +76,12 @@ type AnnualGoals = Record<string, AnnualGoal>
 const monthRange = getCurrentMonthRange()
 const defaultMonthlyLimit = 5000
 const monthlyLimitStorageKey = 'granaflow:monthly-limit'
+const monthOptions = Array.from({ length: 12 }, (_, index) => ({
+  label: new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(new Date(2026, index, 1)),
+  value: index,
+}))
 
-function getPresetRange(preset: DatePreset, lastNDays = 30) {
+function getPresetRange(preset: DatePreset) {
   const today = new Date()
 
   if (preset === 'previous-month') {
@@ -83,20 +91,41 @@ function getPresetRange(preset: DatePreset, lastNDays = 30) {
     }
   }
 
-  if (preset === 'last-n-days') {
-    const start = new Date(today)
-    start.setDate(today.getDate() - Math.max(lastNDays - 1, 0))
-
+  if (preset === 'next-month') {
     return {
-      dateFrom: formatDateInput(start),
-      dateTo: formatDateInput(today),
+      dateFrom: formatDateInput(new Date(today.getFullYear(), today.getMonth() + 1, 1)),
+      dateTo: formatDateInput(new Date(today.getFullYear(), today.getMonth() + 2, 0)),
     }
   }
 
   return getCurrentMonthRange()
 }
 
-function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string, lastNDays: number) {
+function getMonthRange(year: number, monthIndex: number) {
+  return {
+    dateFrom: formatDateInput(new Date(year, monthIndex, 1)),
+    dateTo: formatDateInput(new Date(year, monthIndex + 1, 0)),
+  }
+}
+
+function getPreviousMonthRange(dateFrom: string) {
+  const year = Number(dateFrom.slice(0, 4))
+  const monthIndex = Number(dateFrom.slice(5, 7)) - 1
+
+  return getMonthRange(year, monthIndex - 1)
+}
+
+function getDaysUntilMonthEnd(dateFrom: string) {
+  const today = new Date()
+  const year = Number(dateFrom.slice(0, 4))
+  const monthIndex = Number(dateFrom.slice(5, 7)) - 1
+  const monthEnd = new Date(year, monthIndex + 1, 0)
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+  return Math.max(Math.ceil((monthEnd.getTime() - todayStart.getTime()) / 86_400_000), 0)
+}
+
+function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string) {
   if (preset === 'current-month') {
     return getMonthName(dateFrom)
   }
@@ -105,11 +134,31 @@ function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string, la
     return getMonthName(dateFrom)
   }
 
-  if (preset === 'last-n-days') {
-    return `${lastNDays} dias`
+  if (preset === 'next-month') {
+    return getMonthName(dateFrom)
   }
 
-  return `${formatDateLabel(dateFrom)} - ${formatDateLabel(dateTo)}`
+  return getMonthName(dateFrom) || `${formatDateLabel(dateFrom)} - ${formatDateLabel(dateTo)}`
+}
+
+function getMetricComparison(current: number, previous?: number, mode: 'higher-is-bad' | 'higher-is-good' = 'higher-is-bad') {
+  if (previous === undefined || previous === null) {
+    return 'Sem comparativo'
+  }
+
+  const difference = current - previous
+  if (Math.abs(difference) < 0.01) {
+    return 'Igual ao mÃªs anterior'
+  }
+
+  const direction = difference > 0 ? 'acima' : 'abaixo'
+  const absolute = formatCompactMoney(Math.abs(difference))
+
+  if (mode === 'higher-is-good') {
+    return `${absolute} ${difference > 0 ? 'acima' : 'abaixo'} do mÃªs anterior`
+  }
+
+  return `${absolute} ${direction} do mÃªs anterior`
 }
 
 function App() {
@@ -118,10 +167,12 @@ function App() {
     return view === 'annual' ? 'annual' : 'monthly'
   })
   const [snapshot, setSnapshot] = useState<FinanceSnapshot | null>(null)
+  const [previousSnapshot, setPreviousSnapshot] = useState<FinanceSnapshot | null>(null)
   const [dateFrom, setDateFrom] = useState(monthRange.dateFrom)
   const [dateTo, setDateTo] = useState(monthRange.dateTo)
   const [datePreset, setDatePreset] = useState<DatePreset>('current-month')
-  const [lastNDays, setLastNDays] = useState(30)
+  const [customYear, setCustomYear] = useState(new Date().getFullYear())
+  const [customMonth, setCustomMonth] = useState(new Date().getMonth())
   const [monthlyLimit, setMonthlyLimit] = useState(() => {
     const stored = window.localStorage.getItem(monthlyLimitStorageKey)
     const parsed = Number(stored)
@@ -136,6 +187,7 @@ function App() {
   const [transactionDisplayLimit, setTransactionDisplayLimit] = useState(24)
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null)
   const [isConfigOpen, setIsConfigOpen] = useState(false)
+  const [isAccountsMenuOpen, setIsAccountsMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -162,7 +214,12 @@ function App() {
 
     try {
       const params = new URLSearchParams({ dateFrom, dateTo })
-      const response = await fetch(`/api/pluggy/snapshot?${params.toString()}`)
+      const previousRange = getPreviousMonthRange(dateFrom)
+      const previousParams = new URLSearchParams(previousRange)
+      const [response, previousResponse] = await Promise.all([
+        fetch(`/api/pluggy/snapshot?${params.toString()}`),
+        fetch(`/api/pluggy/snapshot?${previousParams.toString()}`),
+      ])
 
       if (!response.ok) {
         const payload = (await response.json()) as SnapshotError
@@ -170,8 +227,10 @@ function App() {
       }
 
       setSnapshot((await response.json()) as FinanceSnapshot)
+      setPreviousSnapshot(previousResponse.ok ? ((await previousResponse.json()) as FinanceSnapshot) : null)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Nao foi possivel carregar os dados.')
+      setPreviousSnapshot(null)
     } finally {
       setIsLoading(false)
       setIsRefreshing(false)
@@ -195,6 +254,7 @@ function App() {
   }, [accountFilter, budgetFilter, categoryFilter, dateFrom, dateTo, flowFilter, transactionSearch])
 
   const summary = snapshot?.summary
+  const previousSummary = previousSnapshot?.summary
   const expenses = summary?.expenses ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
   const elapsedDays = getElapsedDays(dateFrom, dateTo)
@@ -202,9 +262,9 @@ function App() {
   const monthProgress = Math.min((elapsedDays / daysInMonth) * 100, 100)
   const limitUsage = Math.min((expenses / monthlyLimit) * 100, 100)
   const remainingLimit = monthlyLimit - expenses
-  const projected = summary?.monthlyProjection ?? 0
+  const daysUntilMonthEnd = getDaysUntilMonthEnd(dateFrom)
   const categories = summary?.categories ?? []
-  const periodLabel = getPeriodLabel(datePreset, dateFrom, dateTo, lastNDays)
+  const periodLabel = getPeriodLabel(datePreset, dateFrom, dateTo)
   const maxCategory = Math.max(...categories.map((item) => item.total), 1)
   const tableCategories = useMemo(
     () => [...new Set((snapshot?.transactions ?? []).map((transaction) => transaction.category))].sort(),
@@ -245,62 +305,83 @@ function App() {
 
   const metrics: Metric[] = [
     {
-      label: 'Gasto do mes',
-      value: formatMoney(expenses),
-      detail: `${summary?.budgetTransactionCount ?? 0} lancamentos no orcamento`,
-      icon: Wallet,
-      tone: 'shield',
-    },
-    {
-      label: 'Cartao',
+      label: 'Gastos em crÃ©dito',
       value: formatMoney(summary?.cardExpenses ?? 0),
-      detail: 'Compras do periodo',
+      detail: getMetricComparison(summary?.cardExpenses ?? 0, previousSummary?.cardExpenses),
       icon: CreditCard,
       tone: 'rose',
     },
     {
-      label: 'Conta Nubank',
+      label: 'Gastos em dÃ©bito',
       value: formatMoney(summary?.bankExpenses ?? 0),
-      detail: `${formatCompactMoney(summary?.ignoredOutflow ?? 0)} fora do orcamento`,
+      detail: getMetricComparison(summary?.bankExpenses ?? 0, previousSummary?.bankExpenses),
       icon: Landmark,
       tone: 'mint',
     },
     {
+      label: 'Teto de gasto',
+      value: formatMoney(monthlyLimit),
+      detail: getMetricComparison(expenses, previousSummary?.expenses),
+      icon: Target,
+      progress: limitUsage,
+      progressTone: remainingLimit >= 0 ? 'good' : 'bad',
+      support: (
+        <div className="mt-4">
+          <label htmlFor="monthly-limit" className="sr-only">
+            Teto de gasto
+          </label>
+          <div className="flex h-10 items-center rounded-lg border border-[#263c34] bg-[#101a16] px-3">
+            <span className="text-sm text-[#6f897c]">R$</span>
+            <input
+              id="monthly-limit"
+              className="min-w-0 flex-1 bg-transparent px-2 text-sm font-semibold text-white outline-none"
+              min={1}
+              step={100}
+              type="number"
+              value={monthlyLimit}
+              onChange={(event) => setMonthlyLimit(Math.max(Number(event.target.value) || defaultMonthlyLimit, 1))}
+            />
+          </div>
+          <p className={`mt-2 text-sm font-semibold ${remainingLimit >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'}`}>
+            {Math.round(limitUsage)}% usado Â· {remainingLimit >= 0 ? 'restam ' : 'passou '}
+            {formatCompactMoney(Math.abs(remainingLimit))}
+          </p>
+        </div>
+      ),
+      tone: 'shield',
+    },
+    {
       label: 'Investimentos',
       value: formatMoney(investmentBalance),
-      detail: `${summary?.activeInvestmentCount ?? 0} posicoes ativas`,
+      detail: getMetricComparison(summary?.netInvestmentContribution ?? 0, previousSummary?.netInvestmentContribution, 'higher-is-good'),
       icon: PiggyBank,
       tone: 'amber',
     },
   ]
 
-  function applyPreset(preset: DatePreset, days = lastNDays) {
+  function applyPreset(preset: DatePreset) {
     setDatePreset(preset)
 
     if (preset === 'custom') {
+      const range = getMonthRange(customYear, customMonth)
+      setDateFrom(range.dateFrom)
+      setDateTo(range.dateTo)
       return
     }
 
-    const range = getPresetRange(preset, days)
+    const range = getPresetRange(preset)
     setDateFrom(range.dateFrom)
     setDateTo(range.dateTo)
   }
 
-  function updateLastNDays(value: number) {
-    const safeValue = Math.min(Math.max(value || 1, 1), 365)
-    setLastNDays(safeValue)
-
-    if (datePreset === 'last-n-days') {
-      const range = getPresetRange('last-n-days', safeValue)
-      setDateFrom(range.dateFrom)
-      setDateTo(range.dateTo)
-    }
-  }
-
-  function updateManualDate(nextDateFrom: string, nextDateTo: string) {
+  function updateCustomMonth(nextYear: number, nextMonth: number) {
     setDatePreset('custom')
-    setDateFrom(nextDateFrom)
-    setDateTo(nextDateTo)
+    setCustomYear(nextYear)
+    setCustomMonth(nextMonth)
+
+    const range = getMonthRange(nextYear, nextMonth)
+    setDateFrom(range.dateFrom)
+    setDateTo(range.dateTo)
   }
 
   function clearTableFilters() {
@@ -338,27 +419,6 @@ function App() {
             </div>
           </div>
 
-          <div className="inline-flex h-11 rounded-lg border border-[#263c34] bg-[#101a16] p-1">
-            <button
-              className={`rounded-md px-4 text-sm font-semibold ${
-                activeView === 'monthly' ? 'bg-[#1d3b2e] text-[#d8ffe7]' : 'text-[#8ba397]'
-              }`}
-              type="button"
-              onClick={() => selectView('monthly')}
-            >
-              Mensal
-            </button>
-            <button
-              className={`rounded-md px-4 text-sm font-semibold ${
-                activeView === 'annual' ? 'bg-[#1d3b2e] text-[#d8ffe7]' : 'text-[#8ba397]'
-              }`}
-              type="button"
-              onClick={() => selectView('annual')}
-            >
-              Ano
-            </button>
-          </div>
-
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
             <button
               type="button"
@@ -374,44 +434,35 @@ function App() {
             </button>
             {activeView === 'monthly' ? (
               <>
-            <DatePresetControl
-              lastNDays={lastNDays}
-              preset={datePreset}
-              onDaysChange={updateLastNDays}
-              onPresetChange={applyPreset}
-            />
-            {datePreset === 'custom' ? (
-              <>
-                <DateInput
-                  icon={Calendar}
-                  label="Inicio"
-                  value={dateFrom}
-                  onChange={(value) => updateManualDate(value, dateTo)}
+                <AccountsMenu
+                  accounts={snapshot?.accounts ?? []}
+                  isLoading={isLoading}
+                  isOpen={isAccountsMenuOpen}
+                  onToggle={() => setIsAccountsMenuOpen((current) => !current)}
                 />
-                <DateInput
-                  icon={Calendar}
-                  label="Fim"
-                  value={dateTo}
-                  onChange={(value) => updateManualDate(dateFrom, value)}
-                />
-              </>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => void loadSnapshot(false)}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-[#2f4c41] bg-[#10211b] px-4 text-sm font-semibold text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
-            >
-              <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
-              Atualizar
-            </button>
-            <button
-              type="button"
-              onClick={() => selectView('annual')}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f]"
-            >
-              <BarChart3 className="size-4" aria-hidden="true" />
-              Ver ano
-            </button>
+                <DatePresetControl preset={datePreset} onPresetChange={applyPreset} />
+                {datePreset === 'custom' ? (
+                  <>
+                    <MonthSelect value={customMonth} onChange={(value) => updateCustomMonth(customYear, value)} />
+                    <YearSelect value={customYear} onChange={(value) => updateCustomMonth(value, customMonth)} />
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => void loadSnapshot(false)}
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-[#2f4c41] bg-[#10211b] px-4 text-sm font-semibold text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
+                >
+                  <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  Atualizar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectView('annual')}
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f]"
+                >
+                  <BarChart3 className="size-4" aria-hidden="true" />
+                  Ver ano
+                </button>
               </>
             ) : (
               <button
@@ -430,7 +481,7 @@ function App() {
       {activeView === 'annual' ? (
         <AnnualView />
       ) : (
-      <div className="mx-auto grid max-w-[1560px] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[minmax(0,1fr)_430px] lg:px-8">
+      <div className="mx-auto max-w-[1560px] px-4 py-6 sm:px-6 lg:px-8">
         <section className="space-y-6">
           {error ? <ErrorBanner message={error} /> : null}
           {!hasPluggyCredentials ? (
@@ -454,51 +505,33 @@ function App() {
 
           <section className="relative overflow-hidden rounded-lg border border-[#214236] bg-[#080d0b] shadow-[0_30px_90px_rgba(0,0,0,0.28)]">
             <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(28,188,112,0.12),rgba(8,13,11,0)_36%),linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0)_22%)]" />
-            <div className="relative grid gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
-              <div className="p-5 sm:p-6">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusPill label={snapshot?.item.executionStatus ?? 'SYNC'} />
-                  <span className="rounded-md border border-[#2d5144] bg-[#101a16]/90 px-2 py-1 text-xs font-semibold text-[#8ba397] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
-                    {periodLabel}
-                  </span>
-                </div>
-                <div className="mt-8 flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
-                  <div>
-                    <p className="text-base font-medium text-[#8ba397]">Gasto real do orçamento</p>
-                    <p className="mt-2 text-4xl font-semibold text-white sm:text-5xl">{formatMoney(expenses)}</p>
-                    <p className="mt-3 max-w-3xl text-base text-[#9bb7aa]">
-                      {snapshot
-                        ? `${snapshot.summary.transactionCount} movimentos puxados do ${snapshot.item.connector}. Aportes, resgates e pagamentos de fatura ficam fora; outras transferencias negativas entram.`
-                        : 'Carregando movimentos da Pluggy'}
-                    </p>
-                  </div>
-                  <div className="min-w-[220px]">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-[#8ba397]">Ritmo do mes</span>
-                      <span className="font-semibold text-[#42f08f]">{Math.round(monthProgress)}%</span>
-                    </div>
-                    <div className="mt-3 h-3 overflow-hidden rounded-full bg-[#17231f]">
-                      <div className="h-full rounded-full bg-[#42f08f]" style={{ width: `${monthProgress}%` }} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="border-t border-[#214236] bg-[#0b1410]/88 p-5 lg:border-l lg:border-t-0">
-                <p className="text-base font-medium text-[#8ba397]">Projecao do mes</p>
-                <p className="mt-3 text-4xl font-semibold text-white">{formatMoney(projected)}</p>
-                <div className={`mt-5 flex items-center gap-2 text-base ${projected > monthlyLimit ? 'text-[#ff8d8d]' : 'text-[#42f08f]'}`}>
-                  {projected > monthlyLimit ? (
-                    <ArrowDownRight className="size-5" aria-hidden="true" />
-                  ) : (
-                    <ArrowUpRight className="size-5" aria-hidden="true" />
-                  )}
-                  {projected > monthlyLimit
-                    ? `${formatCompactMoney(projected - monthlyLimit)} acima do teto`
-                    : `${formatCompactMoney(monthlyLimit - projected)} de folga`}
-                </div>
-                <p className="mt-6 text-sm font-medium text-[#657b70]">
+            <div className="relative p-5 sm:p-6">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusPill label={snapshot?.item.executionStatus ?? 'SYNC'} />
+                <span className="rounded-md border border-[#2d5144] bg-[#101a16]/90 px-2 py-1 text-xs font-semibold text-[#8ba397] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+                  {periodLabel}
+                </span>
+                <span className="rounded-md border border-[#2d5144] bg-[#101a16]/90 px-2 py-1 text-xs font-semibold text-[#6f897c] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
                   Sync {formatDateTime(snapshot?.item.updatedAt)}
-                </p>
+                </span>
+              </div>
+              <div className="mt-8 flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+                <div>
+                  <p className="text-base font-medium text-[#8ba397]">Gasto total do mês</p>
+                  <p className="mt-2 text-4xl font-semibold text-white sm:text-5xl">{formatMoney(expenses)}</p>
+                </div>
+                <div className="min-w-[260px]">
+                  <div className="flex items-center justify-between gap-4 text-sm">
+                    <span className="text-[#8ba397]">Progresso do mês</span>
+                    <span className="font-semibold text-[#42f08f]">{Math.round(monthProgress)}%</span>
+                  </div>
+                  <div className="mt-3 h-3 overflow-hidden rounded-full bg-[#17231f]">
+                    <div className="h-full rounded-full bg-[#42f08f]" style={{ width: `${monthProgress}%` }} />
+                  </div>
+                  <p className="mt-2 text-sm font-medium text-[#6f897c]">
+                    {daysUntilMonthEnd} {daysUntilMonthEnd === 1 ? 'dia' : 'dias'} até o fim do mês
+                  </p>
+                </div>
               </div>
             </div>
           </section>
@@ -511,10 +544,7 @@ function App() {
 
           <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Categorias do orçamento</h2>
-                <p className="text-base text-[#8ba397]">Maiores gastos considerados no período</p>
-              </div>
+              <h2 className="text-xl font-semibold text-white">Categorias do orçamento</h2>
             </div>
 
             <div className="mt-6 space-y-4">
@@ -531,10 +561,10 @@ function App() {
           <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
             <div className="flex flex-col gap-2 border-b border-[#203a31] p-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h2 className="text-xl font-semibold text-white">Movimentações</h2>
+                <h2 className="text-xl font-semibold text-white">MovimentaÃ§Ãµes</h2>
                 <p className="text-base text-[#8ba397]">
                   Mostrando {recentTransactions.length} de {filteredTransactions.length}
-                  {activeFilterCount ? ` · ${activeFilterCount} filtro${activeFilterCount > 1 ? 's' : ''}` : ''}
+                  {activeFilterCount ? ` Â· ${activeFilterCount} filtro${activeFilterCount > 1 ? 's' : ''}` : ''}
                 </p>
               </div>
               <button
@@ -627,106 +657,6 @@ function App() {
           </section>
         </section>
 
-        <aside className="space-y-6">
-          <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Limite do mes</h2>
-                <p className={`text-base ${remainingLimit >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'}`}>
-                  {remainingLimit >= 0 ? 'Sobra ' : 'Passou '}
-                  {formatMoney(Math.abs(remainingLimit))}
-                </p>
-              </div>
-              <Target className="size-6 text-[#42f08f]" aria-hidden="true" />
-            </div>
-
-            <div className="mt-5">
-              <label htmlFor="monthly-limit" className="text-base font-medium text-[#8ba397]">
-                Teto
-              </label>
-              <div className="mt-2 flex h-12 items-center rounded-lg border border-[#263c34] bg-[#101a16] px-3">
-                <span className="text-base text-[#6f897c]">R$</span>
-                <input
-                  id="monthly-limit"
-                  className="min-w-0 flex-1 bg-transparent px-2 text-base font-semibold text-white outline-none"
-                  min={1000}
-                  step={100}
-                  type="number"
-                  value={monthlyLimit}
-                  onChange={(event) => setMonthlyLimit(Math.max(Number(event.target.value) || defaultMonthlyLimit, 1))}
-                />
-              </div>
-              <div className="mt-4 h-3 overflow-hidden rounded-full bg-[#17231f]">
-                <div
-                  className={`h-full rounded-full ${remainingLimit >= 0 ? 'bg-[#42f08f]' : 'bg-[#ff6b6b]'}`}
-                  style={{ width: `${limitUsage}%` }}
-                />
-              </div>
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Mapa dos fluxos</h2>
-                <p className="text-base text-[#8ba397]">Separacao para auditar o calculo</p>
-              </div>
-              <SlidersHorizontal className="size-6 text-[#ffc46b]" aria-hidden="true" />
-            </div>
-            <div className="mt-5 grid gap-3">
-              <SideStat label="Ignorado no gasto" value={formatMoney(summary?.ignoredOutflow ?? 0)} />
-              <SideStat label="Transferencias no orcamento" value={formatMoney(summary?.transferOutflow ?? 0)} />
-              <SideStat label="Aportes/resgates" value={formatMoney(summary?.investmentFlow ?? 0)} />
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Contas conectadas</h2>
-                <p className="text-base text-[#8ba397]">{snapshot?.accounts.length ?? 0} fontes no radar</p>
-              </div>
-              <Landmark className="size-6 text-[#42f08f]" aria-hidden="true" />
-            </div>
-            <div className="mt-5 divide-y divide-[#16231e] border-y border-[#16231e]">
-              {snapshot?.accounts.length ? (
-                snapshot.accounts.map((account) => <AccountRow key={account.id} account={account} />)
-              ) : (
-                <EmptyState label={isLoading ? 'Buscando contas' : 'Nenhuma conta carregada'} />
-              )}
-            </div>
-          </section>
-
-          <section className="rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Investimentos</h2>
-                <p className="text-base text-[#8ba397]">Carteira atual pela Pluggy</p>
-              </div>
-              <PiggyBank className="size-6 text-[#ffc46b]" aria-hidden="true" />
-            </div>
-            <div className="mt-5 flex items-end justify-between gap-4">
-              <div>
-                <p className="text-4xl font-semibold text-white">{formatMoney(summary?.investmentBalance ?? 0)}</p>
-                <p className="mt-2 text-base text-[#8ba397]">
-                  {summary?.activeInvestmentCount ?? 0} posicoes ativas
-                </p>
-              </div>
-              <div
-                className={`flex items-center gap-1 text-base font-semibold ${
-                  (summary?.investmentFlow ?? 0) >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'
-                }`}
-              >
-                {(summary?.investmentFlow ?? 0) >= 0 ? (
-                  <ArrowUpRight className="size-4" aria-hidden="true" />
-                ) : (
-                  <ArrowDownRight className="size-4" aria-hidden="true" />
-                )}
-                Fluxo {formatCompactMoney(Math.abs(summary?.investmentFlow ?? 0))}
-              </div>
-            </div>
-          </section>
-        </aside>
       </div>
       )}
 
@@ -1550,7 +1480,7 @@ function AnnualSvgTooltip({ tooltip }: { tooltip: AnnualChartTooltip | null }) {
         y={boxY}
       />
       <text fill="#8ba397" fontSize="12" fontWeight="700" x={boxX + 12} y={boxY + 19}>
-        {tooltip.title.toUpperCase()} · {tooltip.detail}
+        {tooltip.title.toUpperCase()} Â· {tooltip.detail}
       </text>
       <text fill={toneClass} fontSize="18" fontWeight="800" x={boxX + 12} y={boxY + 43}>
         {tooltip.value}
@@ -1754,66 +1684,109 @@ function getAnnualMonthStatus(month: AnnualPlanMonth) {
   return month.isCurrent ? 'Mes atual' : 'Realizado'
 }
 
-function DateInput({
-  icon: Icon,
-  label,
-  value,
-  onChange,
-}: {
-  icon: IconComponent
-  label: string
-  value: string
-  onChange: (value: string) => void
-}) {
-  return (
-    <label className="flex h-12 items-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-base text-[#8ba397]">
-      <Icon className="size-4 text-[#42f08f]" aria-hidden="true" />
-      <span className="sr-only">{label}</span>
-      <input
-        className="w-[148px] bg-transparent font-semibold text-[#edf7ef] outline-none"
-        type="date"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
-  )
-}
-
 function DatePresetControl({
-  lastNDays,
   preset,
-  onDaysChange,
   onPresetChange,
 }: {
-  lastNDays: number
   preset: DatePreset
-  onDaysChange: (value: number) => void
   onPresetChange: (value: DatePreset) => void
 }) {
   return (
-    <div className="flex h-12 items-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-base text-[#8ba397]">
+    <label className="flex h-11 items-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-sm text-[#8ba397]">
       <Calendar className="size-4 text-[#42f08f]" aria-hidden="true" />
+      <span className="sr-only">Período</span>
       <select
-        aria-label="Periodo rapido"
+        aria-label="Período"
         className="bg-transparent font-semibold text-[#edf7ef] outline-none"
         value={preset}
         onChange={(event) => onPresetChange(event.target.value as DatePreset)}
       >
-        <option value="current-month">Mes atual</option>
-        <option value="previous-month">Mes anterior</option>
-        <option value="last-n-days">Ultimos N dias</option>
+        <option value="current-month">Mês atual</option>
+        <option value="previous-month">Mês anterior</option>
+        <option value="next-month">Próximo mês</option>
         <option value="custom">Personalizado</option>
       </select>
-      {preset === 'last-n-days' ? (
-        <input
-          aria-label="Quantidade de dias"
-          className="w-16 rounded-md border border-[#263c34] bg-[#0a0f0d] px-2 py-1 text-right font-semibold text-[#edf7ef] outline-none"
-          min={1}
-          max={365}
-          type="number"
-          value={lastNDays}
-          onChange={(event) => onDaysChange(Number(event.target.value))}
-        />
+    </label>
+  )
+}
+
+function MonthSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <label className="flex h-11 items-center rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-sm text-[#8ba397]">
+      <span className="sr-only">Mês</span>
+      <select
+        className="bg-transparent font-semibold capitalize text-[#edf7ef] outline-none"
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {monthOptions.map((month) => (
+          <option key={month.value} value={month.value}>
+            {month.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function YearSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const currentYear = new Date().getFullYear()
+  const years = Array.from({ length: 7 }, (_, index) => currentYear - 3 + index)
+
+  return (
+    <label className="flex h-11 items-center rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-sm text-[#8ba397]">
+      <span className="sr-only">Ano</span>
+      <select
+        className="bg-transparent font-semibold text-[#edf7ef] outline-none"
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {years.map((year) => (
+          <option key={year} value={year}>
+            {year}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function AccountsMenu({
+  accounts,
+  isLoading,
+  isOpen,
+  onToggle,
+}: {
+  accounts: FinanceAccount[]
+  isLoading: boolean
+  isOpen: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="relative">
+      <button
+        className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-[#2f4c41] bg-[#10211b] px-4 text-sm font-semibold text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
+        type="button"
+        onClick={onToggle}
+      >
+        <Landmark className="size-4 text-[#42f08f]" aria-hidden="true" />
+        Contas
+        <ChevronDown className={`size-4 transition ${isOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+      </button>
+      {isOpen ? (
+        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-40 w-[360px] max-w-[calc(100vw-2rem)] rounded-lg border border-[#244438] bg-[#09100d]/98 p-3 shadow-[0_24px_70px_rgba(0,0,0,0.48)] backdrop-blur">
+          <div className="flex items-center justify-between gap-3 border-b border-[#16231e] pb-2">
+            <h3 className="text-sm font-semibold text-white">Contas conectadas</h3>
+            <span className="text-xs font-semibold text-[#6f897c]">{accounts.length}</span>
+          </div>
+          <div className="mt-2 max-h-[360px] divide-y divide-[#16231e] overflow-y-auto">
+            {accounts.length ? (
+              accounts.map((account) => <AccountRow key={account.id} account={account} />)
+            ) : (
+              <EmptyState label={isLoading ? 'Buscando contas' : 'Nenhuma conta carregada'} />
+            )}
+          </div>
+        </div>
       ) : null}
     </div>
   )
@@ -1864,6 +1837,17 @@ function MetricCard({ metric }: { metric: Metric }) {
           <Icon className="size-6" aria-hidden="true" />
         </div>
       </div>
+      {metric.progress !== undefined ? (
+        <div className="mt-4">
+          <div className="h-3 overflow-hidden rounded-full bg-[#17231f]">
+            <div
+              className={`h-full rounded-full ${metric.progressTone === 'bad' ? 'bg-[#ff6b6b]' : 'bg-[#42f08f]'}`}
+              style={{ width: `${metric.progress}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+      {metric.support}
       <div className="mt-5 flex items-center gap-1 text-base text-[#8ba397]">
         {metric.tone === 'rose' ? (
           <ArrowDownRight className="size-4 text-[#ff8d8d]" aria-hidden="true" />
@@ -1966,15 +1950,6 @@ function AccountRow({ account }: { account: FinanceAccount }) {
         </div>
       </div>
       <p className="shrink-0 text-base font-semibold text-[#d8ffe7]">{formatCompactMoney(account.balance)}</p>
-    </div>
-  )
-}
-
-function SideStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-[#203a31] bg-[#0d1512] px-4 py-3">
-      <span className="text-base text-[#8ba397]">{label}</span>
-      <span className="text-base font-semibold text-white">{value}</span>
     </div>
   )
 }
