@@ -487,7 +487,7 @@ async function fetchTransactions(apiKey, accountId, dateFrom, dateTo) {
     })
 
     if (cursor) {
-      search.set('cursor', cursor)
+      search.set('after', cursor)
     }
 
     const page = await pluggyFetch(`/v2/transactions?${search.toString()}`, apiKey)
