@@ -85,6 +85,7 @@ Ao abrir, o launcher:
 - consulta a ultima GitHub Release e atualiza o proprio `GranaFlow.exe` quando houver versao nova;
 - extrai o app buildado e um Node portatil embutido em `%LOCALAPPDATA%\GranaFlow`;
 - no primeiro uso pergunta porta, credenciais Pluggy e auto-inicio com o Windows;
+- usa `5173` como porta padrao da interface quando a porta fica em branco;
 - inicia o servidor local e abre o navegador padrao.
 
 Requisitos desta versao: Windows x64 e internet para Pluggy/updates. Nao precisa instalar Git, Node.js, npm ou .NET.

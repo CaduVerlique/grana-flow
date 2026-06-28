@@ -13,11 +13,13 @@ const string LatestReleaseApiUrl = "https://api.github.com/repos/" + RepoFullNam
 const string ReleaseAssetName = "GranaFlow.exe";
 const string AppBundleResourceName = "GranaFlow.AppBundle.zip";
 const string NodeBundleResourceName = "GranaFlow.Node.zip";
+const int DefaultAppPort = 5173;
+const int LegacyDefaultAppPort = 8787;
 
 var skipUpdate = args.Any((arg) => arg.Equals("--skip-update", StringComparison.OrdinalIgnoreCase));
 var smokeTest = args.Any((arg) => arg.Equals("--smoke-test", StringComparison.OrdinalIgnoreCase));
-var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+var localAppData = GetFolderPath("GRANAFLOW_LOCALAPPDATA", Environment.SpecialFolder.LocalApplicationData);
+var appData = GetFolderPath("GRANAFLOW_APPDATA", Environment.SpecialFolder.ApplicationData);
 var installRoot = Path.Combine(localAppData, AppName);
 var appRoot = Path.Combine(installRoot, "app");
 var runtimeRoot = Path.Combine(installRoot, "runtime");
@@ -50,6 +52,12 @@ try
 
     if (smokeTest)
     {
+        if (!IsFirstRun(state, envPath))
+        {
+            SyncPortFromEnv(state, envPath);
+            SaveState(launcherStatePath, state);
+        }
+
         RunSmokeTest(nodeExePath, appRoot, logsDir);
         return;
     }
@@ -57,6 +65,10 @@ try
     if (IsFirstRun(state, envPath))
     {
         state = PromptFirstRun(state, envPath, launcherExePath);
+    }
+    else
+    {
+        SyncPortFromEnv(state, envPath);
     }
 
     state.AppReleaseTag = currentReleaseTag;
@@ -90,13 +102,19 @@ static bool IsFirstRun(LauncherState state, string envPath)
     return state.FirstRun || !File.Exists(envPath);
 }
 
+static string GetFolderPath(string overrideVariableName, Environment.SpecialFolder specialFolder)
+{
+    var overridePath = Environment.GetEnvironmentVariable(overrideVariableName);
+    return string.IsNullOrWhiteSpace(overridePath) ? Environment.GetFolderPath(specialFolder) : overridePath;
+}
+
 static LauncherState PromptFirstRun(LauncherState state, string envPath, string launcherExePath)
 {
     WriteHeader("Primeira configuracao");
     Console.WriteLine("Voce pode deixar as credenciais em branco e preencher depois pela UI.");
     Console.WriteLine();
 
-    var port = PromptInt("Porta do app", state.Port > 0 ? state.Port : 8787);
+    var port = PromptInt("Porta do app", state.Port > 0 ? state.Port : DefaultAppPort);
     var clientId = Prompt("Pluggy Client ID (opcional)");
     var clientSecret = Prompt("Pluggy Client Secret (opcional)", secret: true);
     var itemId = Prompt("Pluggy Item ID (opcional)");
@@ -118,6 +136,80 @@ static LauncherState PromptFirstRun(LauncherState state, string envPath, string 
     state.AutoStart = autoStart;
     state.FirstRun = false;
     return state;
+}
+
+static void SyncPortFromEnv(LauncherState state, string envPath)
+{
+    var envPort = ReadApiPort(envPath);
+    if (envPort is null)
+    {
+        return;
+    }
+
+    if (state.Port == LegacyDefaultAppPort && envPort == LegacyDefaultAppPort)
+    {
+        state.Port = DefaultAppPort;
+        WriteApiPort(envPath, DefaultAppPort);
+        Console.WriteLine($"Porta padrao migrada de {LegacyDefaultAppPort} para {DefaultAppPort}.");
+        return;
+    }
+
+    if (envPort > 0 && envPort != state.Port)
+    {
+        state.Port = envPort.Value;
+        Console.WriteLine($"Porta carregada da configuracao local: {state.Port}.");
+    }
+}
+
+static int? ReadApiPort(string envPath)
+{
+    if (!File.Exists(envPath))
+    {
+        return null;
+    }
+
+    foreach (var line in File.ReadAllLines(envPath))
+    {
+        var trimmed = line.Trim();
+        if (!trimmed.StartsWith("API_PORT=", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        var rawValue = trimmed["API_PORT=".Length..].Trim().Trim('"');
+        return int.TryParse(rawValue, out var port) && port > 0 ? port : null;
+    }
+
+    return null;
+}
+
+static void WriteApiPort(string envPath, int port)
+{
+    if (!File.Exists(envPath))
+    {
+        return;
+    }
+
+    var lines = File.ReadAllLines(envPath).ToList();
+    var updated = false;
+    for (var index = 0; index < lines.Count; index++)
+    {
+        if (!lines[index].TrimStart().StartsWith("API_PORT=", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        lines[index] = $"API_PORT={port}";
+        updated = true;
+        break;
+    }
+
+    if (!updated)
+    {
+        lines.Add($"API_PORT={port}");
+    }
+
+    File.WriteAllLines(envPath, lines, Encoding.UTF8);
 }
 
 static string InstallBundledRuntime(string appRoot, string runtimeRoot, string releaseTag, LauncherState state)
@@ -616,7 +708,7 @@ internal sealed class LauncherState
     public string? RuntimeReleaseTag { get; set; }
     public bool AutoStart { get; set; }
     public bool FirstRun { get; set; } = true;
-    public int Port { get; set; } = 8787;
+    public int Port { get; set; } = 5173;
     public int? ServerProcessId { get; set; }
 }
 
