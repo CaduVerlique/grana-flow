@@ -84,12 +84,33 @@ type AnnualGoal = {
 type AnnualGoals = Record<string, AnnualGoal>
 
 const monthRange = getCurrentMonthRange()
-const defaultMonthlyLimit = 5000
-const monthlyLimitStorageKey = 'granaflow:monthly-limit'
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   label: new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(new Date(2026, index, 1)),
   value: index,
 }))
+
+function getAnnualGoalsStorageKey(year: number) {
+  return `granaflow:annual-goals:${year}`
+}
+
+function getMonthlyExpenseGoal(dateFrom: string) {
+  const year = Number(dateFrom.slice(0, 4))
+  const monthKey = dateFrom.slice(0, 7)
+
+  if (!Number.isFinite(year)) {
+    return null
+  }
+
+  try {
+    const stored = window.localStorage.getItem(getAnnualGoalsStorageKey(year))
+    const goals = stored ? (JSON.parse(stored) as AnnualGoals) : {}
+    const expenseGoal = parseGoal(goals[monthKey]?.expenseGoal ?? '')
+
+    return expenseGoal > 0 ? expenseGoal : null
+  } catch {
+    return null
+  }
+}
 
 function getPresetRange(preset: DatePreset) {
   const today = new Date()
@@ -219,12 +240,6 @@ function App() {
   const [datePreset, setDatePreset] = useState<DatePreset>('current-month')
   const [customYear, setCustomYear] = useState(new Date().getFullYear())
   const [customMonth, setCustomMonth] = useState(new Date().getMonth())
-  const [monthlyLimit, setMonthlyLimit] = useState(() => {
-    const stored = window.localStorage.getItem(monthlyLimitStorageKey)
-    const parsed = Number(stored)
-
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultMonthlyLimit
-  })
   const [transactionSearch, setTransactionSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [accountFilter, setAccountFilter] = useState('all')
@@ -292,10 +307,6 @@ function App() {
   }, [loadConfigStatus])
 
   useEffect(() => {
-    window.localStorage.setItem(monthlyLimitStorageKey, String(monthlyLimit))
-  }, [monthlyLimit])
-
-  useEffect(() => {
     setTransactionDisplayLimit(24)
   }, [accountFilter, budgetFilter, categoryFilter, dateFrom, dateTo, flowFilter, transactionSearch])
 
@@ -304,8 +315,10 @@ function App() {
   const expenses = summary?.expenses ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
   const monthProgress = getMonthProgress(dateFrom)
-  const limitUsage = monthlyLimit > 0 ? (expenses / monthlyLimit) * 100 : 0
-  const remainingLimit = monthlyLimit - expenses
+  const monthlyExpenseGoal = getMonthlyExpenseGoal(dateFrom)
+  const hasMonthlyExpenseGoal = monthlyExpenseGoal !== null
+  const limitUsage = hasMonthlyExpenseGoal ? (expenses / monthlyExpenseGoal) * 100 : 0
+  const remainingLimit = (monthlyExpenseGoal ?? 0) - expenses
   const daysUntilMonthEnd = getDaysUntilMonthEnd(dateFrom)
   const categories = summary?.categories ?? []
   const periodLabel = getPeriodLabel(datePreset, dateFrom, dateTo)
@@ -364,32 +377,31 @@ function App() {
     },
     {
       label: 'Teto de gasto',
-      value: formatMoney(monthlyLimit),
+      value: hasMonthlyExpenseGoal ? formatMoney(monthlyExpenseGoal) : 'Sem meta',
       detail: getMetricComparison(expenses, previousSummary?.expenses),
       icon: Target,
-      progress: limitUsage,
+      progress: hasMonthlyExpenseGoal ? limitUsage : undefined,
       progressTone: remainingLimit >= 0 ? 'good' : 'bad',
       support: (
         <div className="mt-4">
-          <label htmlFor="monthly-limit" className="sr-only">
-            Teto de gasto
-          </label>
-          <div className="flex h-10 items-center rounded-lg border border-[#263c34] bg-[#101a16] px-3">
-            <span className="text-sm text-[#6f897c]">R$</span>
-            <input
-              id="monthly-limit"
-              className="min-w-0 flex-1 bg-transparent px-2 text-sm font-semibold text-white outline-none"
-              min={1}
-              step={100}
-              type="number"
-              value={monthlyLimit}
-              onChange={(event) => setMonthlyLimit(Math.max(Number(event.target.value) || defaultMonthlyLimit, 1))}
-            />
-          </div>
-          <p className={`mt-2 text-sm font-semibold ${remainingLimit >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'}`}>
-            {Math.round(limitUsage)}% usado · {remainingLimit >= 0 ? 'restam ' : 'passou '}
-            {formatCompactMoney(Math.abs(remainingLimit))}
-          </p>
+          {hasMonthlyExpenseGoal ? (
+            <>
+              <p className={`text-sm font-semibold ${remainingLimit >= 0 ? 'text-[#42f08f]' : 'text-[#ff8d8d]'}`}>
+                {Math.round(limitUsage)}% usado · {remainingLimit >= 0 ? 'restam ' : 'passou '}
+                {formatCompactMoney(Math.abs(remainingLimit))}
+              </p>
+              <p className="mt-2 text-xs font-medium text-[#6f897c]">Meta de gasto definida na visão anual.</p>
+            </>
+          ) : (
+            <button
+              className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-sm font-semibold text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
+              type="button"
+              onClick={() => selectView('annual')}
+            >
+              <BarChart3 className="size-4 text-[#42f08f]" aria-hidden="true" />
+              Definir na visão anual
+            </button>
+          )}
         </div>
       ),
       tone: 'shield',
@@ -461,10 +473,7 @@ function App() {
                 src="/granaflow-logo.png"
               />
             </div>
-            <div className="hidden min-w-0 sm:block">
-              <h1 className="sr-only">GranaFlow</h1>
-              <p className="text-sm font-medium text-[#8ba397]">Open Finance no modo cabine de comando</p>
-            </div>
+            <h1 className="sr-only">GranaFlow</h1>
           </div>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
@@ -509,17 +518,17 @@ function App() {
                   className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f]"
                 >
                   <BarChart3 className="size-4" aria-hidden="true" />
-                  Ver ano
+                  Visão anual
                 </button>
               </>
             ) : (
               <button
                 type="button"
                 onClick={() => selectView('monthly')}
-                className="inline-flex h-12 items-center justify-center gap-2 rounded-lg border border-[#2f4c41] bg-[#10211b] px-4 text-base font-semibold text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-[#1ebc70] px-4 text-sm font-semibold text-[#06100b] transition hover:bg-[#42f08f]"
               >
-                <Wallet className="size-4 text-[#42f08f]" aria-hidden="true" />
-                Voltar ao mensal
+                <Wallet className="size-4" aria-hidden="true" />
+                Visão mensal
               </button>
             )}
           </div>
@@ -736,7 +745,7 @@ function AnnualView() {
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const storageKey = `granaflow:annual-goals:${year}`
+  const storageKey = getAnnualGoalsStorageKey(year)
 
   const loadAnnual = useCallback(async () => {
     setError(null)
@@ -833,17 +842,14 @@ function AnnualView() {
                   Planejamento anual
                 </span>
               </div>
-              <h2 className="mt-2 truncate text-2xl font-semibold text-white lg:text-3xl">Visao anual de {year}</h2>
-              <p className="hidden max-w-2xl text-sm text-[#8ba397] md:block">
-                Selecione um mes no grafico para editar metas e ver a projecao.
-              </p>
+              <h2 className="mt-2 truncate text-2xl font-semibold text-white lg:text-3xl">Visão anual de {year}</h2>
             </div>
 
             <div className="hidden min-w-0 grid-cols-4 gap-2 xl:grid">
               <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="violet" />
-              <AnnualTopMetric label="Investimento atual" value={formatCompactMoney(annual?.current.investmentBalance ?? 0)} tone="cyan" />
+              <AnnualTopMetric label="Investimento atual" value={formatCompactMoney(annual?.current.investmentBalance ?? 0)} tone="green" />
               <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="red" />
-              <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="green" />
+              <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="blue" />
             </div>
 
             <div className="relative flex shrink-0 items-start gap-2">
