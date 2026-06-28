@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -8,15 +9,18 @@ using Microsoft.Win32;
 
 const string AppName = "GranaFlow";
 const string RepoFullName = "CaduVerlique/grana-flow";
-const string RepoUrl = "https://github.com/CaduVerlique/grana-flow.git";
 const string LatestReleaseApiUrl = "https://api.github.com/repos/" + RepoFullName + "/releases/latest";
 const string ReleaseAssetName = "GranaFlow.exe";
+const string AppBundleResourceName = "GranaFlow.AppBundle.zip";
+const string NodeResourceName = "GranaFlow.Node.exe";
 
 var skipUpdate = args.Any((arg) => arg.Equals("--skip-update", StringComparison.OrdinalIgnoreCase));
+var smokeTest = args.Any((arg) => arg.Equals("--smoke-test", StringComparison.OrdinalIgnoreCase));
 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
 var installRoot = Path.Combine(localAppData, AppName);
-var appRoot = ResolveAppRoot(installRoot);
+var appRoot = Path.Combine(installRoot, "app");
+var runtimeRoot = Path.Combine(installRoot, "runtime");
 var configRoot = Path.Combine(appData, AppName);
 var launcherStatePath = Path.Combine(configRoot, "launcher.json");
 var envPath = Path.Combine(appRoot, ".env.local");
@@ -42,23 +46,23 @@ try
         return;
     }
 
-    EnsureTool("git", "Git e necessario para instalar a versao do app vinculada a release.");
-    EnsureTool("node", "Node.js e necessario para rodar o GranaFlow.");
-    EnsureTool("npm", "npm e necessario para instalar dependencias do GranaFlow.");
+    var nodeExePath = InstallBundledRuntime(appRoot, runtimeRoot, currentReleaseTag, state);
 
-    EnsureRepository(appRoot);
-    var appChanged = SyncRepositoryToRelease(appRoot, currentReleaseTag);
+    if (smokeTest)
+    {
+        RunSmokeTest(nodeExePath, appRoot, logsDir);
+        return;
+    }
 
     if (IsFirstRun(state, envPath))
     {
         state = PromptFirstRun(state, envPath, launcherExePath);
     }
 
-    EnsureNodeDependencies(appRoot, appChanged || !currentReleaseTag.Equals(state.AppReleaseTag, StringComparison.OrdinalIgnoreCase));
-    Run("npm", "run build", appRoot, "Gerando build de producao");
     state.AppReleaseTag = currentReleaseTag;
+    state.RuntimeReleaseTag = currentReleaseTag;
 
-    var serverProcess = StartServer(appRoot, logsDir, state.Port);
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, state.Port);
     state.ServerProcessId = serverProcess.Id;
     SaveState(launcherStatePath, state);
 
@@ -79,18 +83,6 @@ catch (Exception error)
     Console.WriteLine();
     Console.WriteLine("Pressione Enter para fechar.");
     Console.ReadLine();
-}
-
-static string ResolveAppRoot(string installRoot)
-{
-    var baseDir = AppContext.BaseDirectory;
-
-    if (File.Exists(Path.Combine(baseDir, "package.json")) && Directory.Exists(Path.Combine(baseDir, "server")))
-    {
-        return baseDir;
-    }
-
-    return Path.Combine(installRoot, "app");
 }
 
 static bool IsFirstRun(LauncherState state, string envPath)
@@ -128,38 +120,82 @@ static LauncherState PromptFirstRun(LauncherState state, string envPath, string 
     return state;
 }
 
-static void EnsureRepository(string appRoot)
+static string InstallBundledRuntime(string appRoot, string runtimeRoot, string releaseTag, LauncherState state)
 {
-    if (File.Exists(Path.Combine(appRoot, "package.json")))
+    WriteHeader("Preparando app");
+    Directory.CreateDirectory(appRoot);
+    Directory.CreateDirectory(runtimeRoot);
+
+    var nodeExePath = Path.Combine(runtimeRoot, "node.exe");
+    var shouldRefreshRuntime = !File.Exists(nodeExePath) || !releaseTag.Equals(state.RuntimeReleaseTag, StringComparison.OrdinalIgnoreCase);
+    if (shouldRefreshRuntime)
     {
-        return;
+        ExtractEmbeddedResource(NodeResourceName, nodeExePath);
     }
 
-    WriteHeader("Instalando app");
-    Directory.CreateDirectory(Path.GetDirectoryName(appRoot)!);
-    Run("git", $"clone {RepoUrl} \"{appRoot}\"", Path.GetDirectoryName(appRoot)!, "Clonando repositorio");
-}
+    var shouldRefreshApp =
+        !releaseTag.Equals(state.AppReleaseTag, StringComparison.OrdinalIgnoreCase) ||
+        !File.Exists(Path.Combine(appRoot, "server", "index.mjs")) ||
+        !File.Exists(Path.Combine(appRoot, "dist", "index.html"));
 
-static bool SyncRepositoryToRelease(string appRoot, string releaseTag)
-{
-    if (!Directory.Exists(Path.Combine(appRoot, ".git")))
+    if (shouldRefreshApp)
     {
-        Console.WriteLine("Repositorio Git nao encontrado; usando arquivos locais do app.");
-        return false;
+        DeleteDirectoryIfExists(Path.Combine(appRoot, "server"));
+        DeleteDirectoryIfExists(Path.Combine(appRoot, "dist"));
+
+        var appBundlePath = Path.Combine(runtimeRoot, "app.zip");
+        ExtractEmbeddedResource(AppBundleResourceName, appBundlePath);
+        ZipFile.ExtractToDirectory(appBundlePath, appRoot, overwriteFiles: true);
+        Console.WriteLine($"App local atualizado para {releaseTag}.");
     }
-
-    WriteHeader("Sincronizando app");
-    Run("git", "fetch --tags --prune origin", appRoot, "Buscando tags da release");
-
-    var currentTag = Capture("git", "describe --tags --exact-match", appRoot, allowFailure: true).Trim();
-    if (releaseTag.Equals(currentTag, StringComparison.OrdinalIgnoreCase))
+    else
     {
         Console.WriteLine($"App ja esta na release {releaseTag}.");
-        return false;
     }
 
-    Run("git", $"checkout tags/{releaseTag}", appRoot, $"Aplicando release {releaseTag}");
-    return true;
+    return nodeExePath;
+}
+
+static void ExtractEmbeddedResource(string resourceName, string destinationPath)
+{
+    using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+    if (stream is null)
+    {
+        throw new InvalidOperationException($"Recurso embutido {resourceName} nao encontrado. Gere a release com npm run release:win.");
+    }
+
+    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+    using var destination = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+    stream.CopyTo(destination);
+}
+
+static void DeleteDirectoryIfExists(string path)
+{
+    if (Directory.Exists(path))
+    {
+        Directory.Delete(path, recursive: true);
+    }
+}
+
+static void RunSmokeTest(string nodeExePath, string appRoot, string logsDir)
+{
+    const int smokePort = 8798;
+    WriteHeader("Smoke test");
+    var serverProcess = StartServer(nodeExePath, appRoot, logsDir, smokePort);
+
+    try
+    {
+        WaitForServer($"http://127.0.0.1:{smokePort}/");
+        Console.WriteLine("Smoke test OK.");
+    }
+    finally
+    {
+        if (!serverProcess.HasExited)
+        {
+            serverProcess.Kill(entireProcessTree: true);
+            serverProcess.WaitForExit(5000);
+        }
+    }
 }
 
 static bool TryUpdateLauncher(string launcherExePath, string currentReleaseTag)
@@ -188,27 +224,28 @@ static bool TryUpdateLauncher(string launcherExePath, string currentReleaseTag)
     var asset = latestRelease.Assets?.FirstOrDefault((item) => item.Name.Equals(ReleaseAssetName, StringComparison.OrdinalIgnoreCase));
     if (asset is null || string.IsNullOrWhiteSpace(asset.BrowserDownloadUrl))
     {
-        throw new InvalidOperationException($"Release {latestRelease.TagName} nao tem o asset {ReleaseAssetName}.");
+        Console.WriteLine($"Release {latestRelease.TagName} nao tem o asset {ReleaseAssetName}; usando versao atual.");
+        return false;
     }
 
     Console.WriteLine($"Nova release encontrada: {latestRelease.TagName}. Baixando executavel...");
     var updateDir = Path.Combine(Path.GetTempPath(), AppName, "updates");
     Directory.CreateDirectory(updateDir);
 
-    var downloadedExePath = Path.Combine(updateDir, $"{AppName}-{SanitizeFileName(latestRelease.TagName)}.exe");
-    DownloadFile(asset.BrowserDownloadUrl, downloadedExePath);
-    StartSelfUpdater(downloadedExePath, launcherExePath);
+    try
+    {
+        var downloadedExePath = Path.Combine(updateDir, $"{AppName}-{SanitizeFileName(latestRelease.TagName)}.exe");
+        DownloadFile(asset.BrowserDownloadUrl, downloadedExePath);
+        StartSelfUpdater(downloadedExePath, launcherExePath);
+    }
+    catch (Exception error)
+    {
+        Console.WriteLine($"Update nao aplicado agora: {error.Message}");
+        return false;
+    }
 
     Console.WriteLine("Update baixado. O GranaFlow vai reiniciar com a nova versao.");
     return true;
-}
-
-static void EnsureNodeDependencies(string appRoot, bool force)
-{
-    if (force || !Directory.Exists(Path.Combine(appRoot, "node_modules")))
-    {
-        Run("npm", "install", appRoot, "Conferindo dependencias");
-    }
 }
 
 static ReleaseInfo? FetchLatestRelease()
@@ -355,7 +392,7 @@ static string QuoteCliArg(string value)
     return $"\"{value.Replace("\"", "\\\"")}\"";
 }
 
-static Process StartServer(string appRoot, string logsDir, int port)
+static Process StartServer(string nodeExePath, string appRoot, string logsDir, int port)
 {
     WriteHeader("Subindo servidor");
     Directory.CreateDirectory(logsDir);
@@ -364,7 +401,7 @@ static Process StartServer(string appRoot, string logsDir, int port)
     var stderrPath = Path.Combine(logsDir, "server.err.log");
     var startInfo = new ProcessStartInfo
     {
-        FileName = "node",
+        FileName = nodeExePath,
         Arguments = "server/index.mjs",
         WorkingDirectory = appRoot,
         UseShellExecute = false,
@@ -450,74 +487,6 @@ static void KillPreviousServer(LauncherState state)
     }
 
     state.ServerProcessId = null;
-}
-
-static void EnsureTool(string tool, string message)
-{
-    var output = Capture(tool, "--version", Directory.GetCurrentDirectory(), allowFailure: true);
-    if (string.IsNullOrWhiteSpace(output))
-    {
-        throw new InvalidOperationException(message);
-    }
-}
-
-static void Run(string fileName, string arguments, string workingDirectory, string label)
-{
-    Console.WriteLine(label);
-
-    var startInfo = new ProcessStartInfo
-    {
-        FileName = fileName,
-        Arguments = arguments,
-        WorkingDirectory = workingDirectory,
-        UseShellExecute = false,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        CreateNoWindow = true,
-    };
-
-    using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Falha ao executar {fileName}.");
-    process.OutputDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) Console.WriteLine(eventArgs.Data); };
-    process.ErrorDataReceived += (_, eventArgs) => { if (eventArgs.Data is not null) Console.Error.WriteLine(eventArgs.Data); };
-    process.BeginOutputReadLine();
-    process.BeginErrorReadLine();
-    process.WaitForExit();
-
-    if (process.ExitCode != 0)
-    {
-        throw new InvalidOperationException($"{label} falhou com codigo {process.ExitCode}.");
-    }
-}
-
-static string Capture(string fileName, string arguments, string workingDirectory, bool allowFailure = false)
-{
-    var startInfo = new ProcessStartInfo
-    {
-        FileName = fileName,
-        Arguments = arguments,
-        WorkingDirectory = workingDirectory,
-        UseShellExecute = false,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        CreateNoWindow = true,
-    };
-
-    using var process = Process.Start(startInfo);
-    if (process is null)
-    {
-        return string.Empty;
-    }
-
-    var output = process.StandardOutput.ReadToEnd();
-    var error = process.StandardError.ReadToEnd();
-    process.WaitForExit();
-
-    if (process.ExitCode != 0 && !allowFailure)
-    {
-        throw new InvalidOperationException(error.Trim().Length > 0 ? error.Trim() : $"{fileName} falhou.");
-    }
-
-    return process.ExitCode == 0 ? output : string.Empty;
 }
 
 static LauncherState LoadState(string path)
@@ -637,6 +606,7 @@ static void WriteHeader(string title)
 internal sealed class LauncherState
 {
     public string? AppReleaseTag { get; set; }
+    public string? RuntimeReleaseTag { get; set; }
     public bool AutoStart { get; set; }
     public bool FirstRun { get; set; } = true;
     public int Port { get; set; } = 8787;
