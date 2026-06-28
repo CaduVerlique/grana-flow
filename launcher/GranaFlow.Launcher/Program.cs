@@ -12,7 +12,7 @@ const string RepoFullName = "CaduVerlique/grana-flow";
 const string LatestReleaseApiUrl = "https://api.github.com/repos/" + RepoFullName + "/releases/latest";
 const string ReleaseAssetName = "GranaFlow.exe";
 const string AppBundleResourceName = "GranaFlow.AppBundle.zip";
-const string NodeResourceName = "GranaFlow.Node.exe";
+const string NodeBundleResourceName = "GranaFlow.Node.zip";
 
 var skipUpdate = args.Any((arg) => arg.Equals("--skip-update", StringComparison.OrdinalIgnoreCase));
 var smokeTest = args.Any((arg) => arg.Equals("--smoke-test", StringComparison.OrdinalIgnoreCase));
@@ -130,7 +130,14 @@ static string InstallBundledRuntime(string appRoot, string runtimeRoot, string r
     var shouldRefreshRuntime = !File.Exists(nodeExePath) || !releaseTag.Equals(state.RuntimeReleaseTag, StringComparison.OrdinalIgnoreCase);
     if (shouldRefreshRuntime)
     {
-        ExtractEmbeddedResource(NodeResourceName, nodeExePath);
+        var nodeBundlePath = Path.Combine(runtimeRoot, "node.zip");
+        ExtractEmbeddedResource(NodeBundleResourceName, nodeBundlePath);
+        ZipFile.ExtractToDirectory(nodeBundlePath, runtimeRoot, overwriteFiles: true);
+
+        if (!File.Exists(nodeExePath))
+        {
+            throw new InvalidOperationException("Runtime Node portatil nao foi extraido corretamente.");
+        }
     }
 
     var shouldRefreshApp =
@@ -261,7 +268,7 @@ static ReleaseInfo? FetchLatestRelease()
         }
 
         var payload = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-        return JsonSerializer.Deserialize<ReleaseInfo>(payload);
+        return JsonSerializer.Deserialize(payload, LauncherJsonContext.Default.ReleaseInfo);
     }
     catch (Exception error)
     {
@@ -498,7 +505,7 @@ static LauncherState LoadState(string path)
 
     try
     {
-        return JsonSerializer.Deserialize<LauncherState>(File.ReadAllText(path)) ?? new LauncherState();
+        return JsonSerializer.Deserialize(File.ReadAllText(path), LauncherJsonContext.Default.LauncherState) ?? new LauncherState();
     }
     catch
     {
@@ -509,7 +516,7 @@ static LauncherState LoadState(string path)
 static void SaveState(string path, LauncherState state)
 {
     Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-    File.WriteAllText(path, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
+    File.WriteAllText(path, JsonSerializer.Serialize(state, LauncherJsonContext.Default.LauncherState));
 }
 
 static void SetAutoStart(bool enabled, string launcherExePath)
@@ -629,4 +636,11 @@ internal sealed class ReleaseAsset
 
     [JsonPropertyName("browser_download_url")]
     public string BrowserDownloadUrl { get; set; } = string.Empty;
+}
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(LauncherState))]
+[JsonSerializable(typeof(ReleaseInfo))]
+internal sealed partial class LauncherJsonContext : JsonSerializerContext
+{
 }

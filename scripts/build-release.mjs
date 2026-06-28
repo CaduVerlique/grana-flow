@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 const releaseDir = resolve('release/win-x64')
 const launcherResourcesDir = resolve('launcher/GranaFlow.Launcher/Resources')
 const appBundlePath = resolve(launcherResourcesDir, 'app.zip')
-const embeddedNodePath = resolve(launcherResourcesDir, 'node.exe')
+const nodeBundlePath = resolve(launcherResourcesDir, 'node.zip')
 
 run('npm', ['run', 'build'])
 
@@ -21,7 +21,7 @@ run('dotnet', [
   '--self-contained',
   'true',
   '-p:PublishSingleFile=true',
-  '-p:PublishTrimmed=false',
+  '-p:PublishTrimmed=true',
   '-o',
   releaseDir,
 ])
@@ -56,7 +56,10 @@ function prepareLauncherResources() {
   rmSync(launcherResourcesDir, { recursive: true, force: true })
   mkdirSync(launcherResourcesDir, { recursive: true })
 
-  copyFileSync(process.execPath, embeddedNodePath)
+  const nodeExePath = resolve(launcherResourcesDir, 'node.exe')
+  copyFileSync(process.execPath, nodeExePath)
+  compressPaths([nodeExePath], nodeBundlePath)
+  rmSync(nodeExePath, { force: true })
   createAppBundle()
 }
 
@@ -66,6 +69,10 @@ function createAppBundle() {
     process.exit(1)
   }
 
+  compressPaths([resolve('server'), resolve('dist')], appBundlePath)
+}
+
+function compressPaths(paths, destinationPath) {
   run('powershell.exe', [
     '-NoProfile',
     '-ExecutionPolicy',
@@ -73,7 +80,7 @@ function createAppBundle() {
     '-Command',
     [
       '$ErrorActionPreference = "Stop"',
-      `Compress-Archive -Path @(${quotePowerShellPath(resolve('server'))}, ${quotePowerShellPath(resolve('dist'))}) -DestinationPath ${quotePowerShellPath(appBundlePath)} -Force`,
+      `Compress-Archive -Path @(${paths.map(quotePowerShellPath).join(', ')}) -DestinationPath ${quotePowerShellPath(destinationPath)} -Force`,
     ].join('; '),
   ])
 }
