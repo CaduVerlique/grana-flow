@@ -1475,15 +1475,16 @@ function AnnualCompositeChart({
 
       {months.map((month, index) => {
         const x = left + monthStep * (index + 0.5)
-        const investmentValue = Math.max(month.projectedInvestment, 0)
+        const investmentValue = Math.max(month.summary.netInvestmentContribution, 0)
         const investmentY = positiveY(investmentValue)
         const investmentHeight = axisY - investmentY
+        const expenseValue = month.summary.expenses
         const expenseY = axisY
-        const expenseHeight = negativeY(month.projectedExpense) - axisY
+        const expenseHeight = negativeY(expenseValue) - axisY
         const isSelected = month.key === selectedMonthKey
-        const expenseLabel = month.isFuture ? 'Gasto projetado' : 'Gasto realizado'
-        const investmentLabel = month.isFuture ? 'Invest. projetado' : 'Investido realizado'
-        const shouldRenderBars = !month.isFuture
+        const expenseLabel = 'Gasto realizado'
+        const investmentLabel = 'Investido realizado'
+        const shouldRenderBars = !month.isFuture || expenseValue > 0 || investmentValue > 0
 
         return (
           <g key={month.key}>
@@ -1531,7 +1532,7 @@ function AnnualCompositeChart({
                 <rect
                   className="cursor-pointer transition-opacity hover:opacity-90"
                   fill="url(#annual-red-hatch)"
-                  height={Math.max(expenseHeight, month.projectedExpense ? 2 : 0)}
+                  height={Math.max(expenseHeight, expenseValue ? 2 : 0)}
                   stroke="#ff5f64"
                   strokeOpacity="0.96"
                   strokeWidth="3.2"
@@ -1545,13 +1546,13 @@ function AnnualCompositeChart({
                       detail: month.label,
                       title: expenseLabel,
                       tone: 'red',
-                      value: `-${formatMoney(month.projectedExpense)}`,
+                      value: `-${formatMoney(expenseValue)}`,
                       x,
                       y: expenseY + expenseHeight,
                     })
                   }}
                 >
-                  <title>{`${month.label} ${expenseLabel.toLowerCase()}: -${formatMoney(month.projectedExpense)}`}</title>
+                  <title>{`${month.label} ${expenseLabel.toLowerCase()}: -${formatMoney(expenseValue)}`}</title>
                 </rect>
               </>
             ) : null}
@@ -1789,6 +1790,9 @@ function AnnualMonthFocus({
     )
   }
 
+  const hasRealizedExpense = month.summary.expenses > 0
+  const hasRealizedInvestment = Math.abs(month.summary.netInvestmentContribution) > 0
+
   return (
     <aside className="hidden min-h-0 flex-col overflow-hidden rounded-lg border border-[#182721] bg-[#0b1410]/95 p-4 lg:flex">
       <div className="min-h-0">
@@ -1805,12 +1809,12 @@ function AnnualMonthFocus({
         <div className="mt-5 grid gap-2">
           <AnnualFocusMetric
             label="Gasto realizado"
-            value={month.isFuture ? '-' : formatMoney(month.summary.expenses)}
+            value={month.isFuture && !hasRealizedExpense ? '-' : formatMoney(month.summary.expenses)}
             tone="red"
           />
           <AnnualFocusMetric
             label="Investido real"
-            value={month.isFuture ? '-' : formatMoney(month.summary.netInvestmentContribution)}
+            value={month.isFuture && !hasRealizedInvestment ? '-' : formatMoney(month.summary.netInvestmentContribution)}
             tone={month.summary.netInvestmentContribution >= 0 ? 'green' : 'amber'}
           />
           <AnnualFocusMetric label="Gasto projetado" value={formatMoney(month.projectedExpense)} tone="red" />

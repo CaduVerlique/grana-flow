@@ -574,9 +574,13 @@ async function normalizeTransaction(transaction, account) {
     type: transaction.type,
     amount: signedAmount,
     budgetAmount,
+    createdAt: transaction.createdAt ?? null,
     isBudgetExpense: budgetAmount < 0,
     ignoredForBudget: budgetAmount === 0,
     ignoreReason: getIgnoreReason(account, transaction, rawCategory, description),
+    installmentNumber: Number(transaction.creditCardMetadata?.installmentNumber ?? 0) || null,
+    purchaseDate: transaction.creditCardMetadata?.purchaseDate ?? null,
+    totalInstallments: Number(transaction.creditCardMetadata?.totalInstallments ?? 0) || null,
     originalAmount: rawAmount,
     originalCurrencyCode: currency.originalCurrencyCode,
     convertedAmount: currency.convertedAmount,
@@ -781,6 +785,133 @@ function markCreditCardPaymentCounterparts(transactions) {
   }
 }
 
+function markAnticipatedInstallmentArtifacts(transactions, contextTransactions = transactions) {
+  const groups = new Map()
+
+  for (const transaction of contextTransactions) {
+    const groupKey = getInstallmentGroupKey(transaction)
+
+    if (!groupKey) {
+      continue
+    }
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, [])
+    }
+
+    groups.get(groupKey).push(transaction)
+  }
+
+  const ignoredIds = new Set()
+  for (const installments of groups.values()) {
+    const byDate = new Map()
+    const existingNumbers = new Set()
+
+    for (const installment of installments) {
+      existingNumbers.add(installment.installmentNumber)
+      const dateKey = installment.date.slice(0, 10)
+      if (!byDate.has(dateKey)) {
+        byDate.set(dateKey, new Set())
+      }
+      byDate.get(dateKey).add(installment.installmentNumber)
+    }
+
+    const batchedNumbers = [...byDate.values()]
+      .filter((numbers) => numbers.size > 1)
+      .flatMap((numbers) => [...numbers])
+
+    if (!batchedNumbers.length) {
+      continue
+    }
+
+    const maxBatchedNumber = Math.max(...batchedNumbers)
+    for (const installment of installments) {
+      if (installment.status !== 'PENDING' || installment.installmentNumber <= maxBatchedNumber) {
+        continue
+      }
+
+      const hasMissingPriorInstallment = Array.from(
+        { length: installment.installmentNumber - maxBatchedNumber - 1 },
+        (_, index) => maxBatchedNumber + index + 1,
+      ).some((number) => !existingNumbers.has(number))
+
+      if (hasMissingPriorInstallment) {
+        ignoredIds.add(installment.id)
+      }
+    }
+  }
+
+  for (const transaction of transactions) {
+    if (!ignoredIds.has(transaction.id)) {
+      continue
+    }
+
+    transaction.budgetAmount = 0
+    transaction.isBudgetExpense = false
+    transaction.ignoredForBudget = true
+    transaction.ignoreReason = 'Parcela antecipada'
+  }
+}
+
+function getInstallmentGroupKey(transaction) {
+  if (
+    transaction.accountType !== 'CREDIT' ||
+    transaction.type !== 'DEBIT' ||
+    !transaction.installmentNumber ||
+    !transaction.totalInstallments ||
+    !transaction.purchaseDate
+  ) {
+    return null
+  }
+
+  const baseDescription = transaction.description
+    .replace(/\s+\d+\s*\/\s*\d+\s*$/u, '')
+    .trim()
+    .toLowerCase()
+  const amount = Math.abs(Number(transaction.originalAmount ?? transaction.amount ?? 0)).toFixed(2)
+
+  return [
+    transaction.accountId,
+    transaction.purchaseDate.slice(0, 10),
+    transaction.totalInstallments,
+    amount,
+    baseDescription,
+  ].join('|')
+}
+
+async function getInstallmentContextTransactions(apiKey, accounts, dateFrom, dateTo, transactions) {
+  if (!shouldFetchInstallmentContext(dateFrom, dateTo, transactions)) {
+    return transactions
+  }
+
+  const year = Number(dateFrom.slice(0, 4))
+  const yearStart = `${year}-01-01`
+  const yearEnd = `${year}-12-31`
+  const transactionPages = await Promise.all(
+    accounts
+      .filter((account) => account.type === 'CREDIT')
+      .map(async (account) => {
+        const results = await fetchTransactions(apiKey, account.id, yearStart, yearEnd)
+        return Promise.all(results.map((transaction) => normalizeTransaction(transaction, account)))
+      }),
+  )
+
+  return transactionPages.flat()
+}
+
+function shouldFetchInstallmentContext(dateFrom, dateTo, transactions) {
+  if (dateFrom.slice(0, 4) !== dateTo.slice(0, 4)) {
+    return false
+  }
+
+  if (!transactions.some((transaction) => getInstallmentGroupKey(transaction))) {
+    return false
+  }
+
+  const todayKey = formatDate(new Date())
+  return dateFrom > todayKey || dateTo > todayKey
+}
+
 function buildSummary(accounts, transactions, investments, bills, dateFrom, dateTo) {
   const budgetExpenses = transactions.filter((item) => item.budgetAmount < 0)
   const expenses = budgetExpenses.reduce((sum, item) => sum + Math.abs(item.budgetAmount), 0)
@@ -948,6 +1079,8 @@ async function getSnapshot(requestUrl) {
   )
   const transactions = transactionPages.flat().sort((a, b) => b.date.localeCompare(a.date))
   markCreditCardPaymentCounterparts(transactions)
+  const installmentContextTransactions = await getInstallmentContextTransactions(apiKey, accounts, dateFrom, dateTo, transactions)
+  markAnticipatedInstallmentArtifacts(transactions, installmentContextTransactions)
   const [investmentPayload, billPages] = await Promise.all([
     fetchInvestments(apiKey, config.itemId),
     Promise.all(accounts.filter((account) => account.type === 'CREDIT').map((account) => fetchBills(apiKey, account.id).then((bills) => bills.map((bill) => normalizeBill(bill, account))))),
@@ -1011,6 +1144,7 @@ async function getAnnualSnapshot(requestUrl) {
   )
   const transactions = transactionPages.flat().sort((a, b) => b.date.localeCompare(a.date))
   markCreditCardPaymentCounterparts(transactions)
+  markAnticipatedInstallmentArtifacts(transactions)
   const [investmentPayload, billPages] = await Promise.all([
     fetchInvestments(apiKey, config.itemId),
     Promise.all(accounts.filter((account) => account.type === 'CREDIT').map((account) => fetchBills(apiKey, account.id).then((bills) => bills.map((bill) => normalizeBill(bill, account))))),

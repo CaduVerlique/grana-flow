@@ -23,9 +23,13 @@ export type FinanceTransaction = {
   type: 'DEBIT' | 'CREDIT' | string
   amount: number
   budgetAmount: number
+  createdAt: string | null
   isBudgetExpense: boolean
   ignoredForBudget: boolean
   ignoreReason: string | null
+  installmentNumber: number | null
+  purchaseDate: string | null
+  totalInstallments: number | null
   originalAmount: number
   originalCurrencyCode: string
   convertedAmount: number | null
