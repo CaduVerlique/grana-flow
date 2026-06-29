@@ -40,6 +40,8 @@ import {
   type FinanceTransaction,
 } from './lib/finance'
 
+declare const __APP_VERSION__: string
+
 type IconComponent = ComponentType<SVGProps<SVGSVGElement>>
 
 type Metric = {
@@ -481,6 +483,9 @@ function App() {
               />
             </div>
             <h1 className="sr-only">GranaFlow</h1>
+            <span className="rounded-md border border-[#1f3f33] bg-[#050806] px-2 py-1 text-xs font-semibold text-[#5f766b]">
+              v{__APP_VERSION__}
+            </span>
           </div>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end">
@@ -1324,7 +1329,6 @@ function AnnualInteractiveGraph({
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h3 className="truncate text-lg font-semibold text-white lg:text-xl">Fluxo anual composto</h3>
-          <p className="hidden text-sm text-[#6f897c] sm:block">Meses futuros mostram projecao; realizado aparece so ate o mes atual.</p>
         </div>
         <div className="hidden shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs font-semibold text-[#8ba397] md:flex">
           <span className="inline-flex items-center gap-1"><span className="size-2 bg-[#42f08f]" />Invest. real</span>
@@ -1485,6 +1489,9 @@ function AnnualCompositeChart({
         const expenseLabel = 'Gasto realizado'
         const investmentLabel = 'Investido realizado'
         const shouldRenderBars = !month.isFuture || expenseValue > 0 || investmentValue > 0
+        const shouldLabelFutureValues = month.isFuture && (expenseValue > 0 || investmentValue > 0)
+        const investmentLabelY = Math.max(investmentY - 8, top + 12)
+        const expenseLabelY = Math.min(expenseY + expenseHeight + 16, axisY + halfHeight - 4)
 
         return (
           <g key={month.key}>
@@ -1554,6 +1561,38 @@ function AnnualCompositeChart({
                 >
                   <title>{`${month.label} ${expenseLabel.toLowerCase()}: -${formatMoney(expenseValue)}`}</title>
                 </rect>
+
+                {shouldLabelFutureValues && investmentValue > 0 ? (
+                  <text
+                    fill="#42f08f"
+                    fontSize="12"
+                    fontWeight="800"
+                    paintOrder="stroke"
+                    stroke="#07100c"
+                    strokeWidth="4"
+                    textAnchor="middle"
+                    x={x}
+                    y={investmentLabelY}
+                  >
+                    {formatCompactMoney(investmentValue)}
+                  </text>
+                ) : null}
+
+                {shouldLabelFutureValues && expenseValue > 0 ? (
+                  <text
+                    fill="#ff8d8d"
+                    fontSize="12"
+                    fontWeight="800"
+                    paintOrder="stroke"
+                    stroke="#07100c"
+                    strokeWidth="4"
+                    textAnchor="middle"
+                    x={x}
+                    y={expenseLabelY}
+                  >
+                    -{formatCompactMoney(expenseValue)}
+                  </text>
+                ) : null}
               </>
             ) : null}
 
