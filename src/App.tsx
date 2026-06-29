@@ -46,6 +46,7 @@ type Metric = {
   label: string
   value: string
   detail: MetricComparison
+  footer?: ReactNode
   icon: IconComponent
   progress?: number
   progressTone?: 'good' | 'bad'
@@ -314,6 +315,7 @@ function App() {
   const previousSummary = previousSnapshot?.summary
   const expenses = summary?.expenses ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
+  const monthlyInvestment = summary?.netInvestmentContribution ?? 0
   const monthProgress = getMonthProgress(dateFrom)
   const monthlyExpenseGoal = getMonthlyExpenseGoal(dateFrom)
   const hasMonthlyExpenseGoal = monthlyExpenseGoal !== null
@@ -408,8 +410,13 @@ function App() {
     },
     {
       label: 'Investimentos',
-      value: formatMoney(investmentBalance),
-      detail: getMetricComparison(summary?.netInvestmentContribution ?? 0, previousSummary?.netInvestmentContribution, 'higher-is-good'),
+      value: formatMoney(monthlyInvestment),
+      detail: getMetricComparison(monthlyInvestment, previousSummary?.netInvestmentContribution, 'higher-is-good'),
+      footer: (
+        <p className="mt-3 text-xs font-medium text-[#6f897c]">
+          Total acumulado: <span className="font-semibold text-[#8ba397]">{formatMoney(investmentBalance)}</span>
+        </p>
+      ),
       icon: PiggyBank,
       tone: 'amber',
     },
@@ -2030,6 +2037,7 @@ function MetricCard({ metric }: { metric: Metric }) {
         <ComparisonIcon className="size-4" aria-hidden="true" />
         <span className={metric.detail.sentiment === 'neutral' ? 'text-[#8ba397]' : undefined}>{metric.detail.label}</span>
       </div>
+      {metric.footer}
     </article>
   )
 }
