@@ -786,6 +786,7 @@ function AnnualView() {
     setGoals(stored ? (JSON.parse(stored) as AnnualGoals) : {})
     setIsDirty(false)
     setIsAnnualGoalsMenuOpen(false)
+    setSelectedMonthKey(null)
     setSavedAt(null)
   }, [storageKey])
 
@@ -794,27 +795,15 @@ function AnnualView() {
   }, [loadAnnual])
 
   const annualPlan = useMemo(() => buildAnnualPlan(annual, goals), [annual, goals])
-  const defaultSelectedMonthKey = useMemo(
-    () =>
-      annualPlan.months.find((month) => month.isCurrent)?.key ??
-      annualPlan.months.find((month) => month.isFuture)?.key ??
-      annualPlan.months[0]?.key ??
-      null,
-    [annualPlan.months],
-  )
-  const selectedMonth = annualPlan.months.find((month) => month.key === selectedMonthKey) ?? annualPlan.months.find((month) => month.key === defaultSelectedMonthKey) ?? null
+  const selectedMonth = annualPlan.months.find((month) => month.key === selectedMonthKey) ?? null
   const currentGrossAmount = (annual?.current.accountBalance ?? 0) + (annual?.current.investmentBalance ?? 0)
   const projectedInvestmentDecember = annualPlan.projectedInvestmentTotal
 
   useEffect(() => {
-    if (!defaultSelectedMonthKey) {
-      return
-    }
-
     setSelectedMonthKey((current) => (
-      current && annualPlan.months.some((month) => month.key === current) ? current : defaultSelectedMonthKey
+      current && annualPlan.months.some((month) => month.key === current) ? current : null
     ))
-  }, [annualPlan.months, defaultSelectedMonthKey])
+  }, [annualPlan.months])
 
   function updateGoal(monthKey: string, field: keyof AnnualGoal, value: string) {
     setGoals((current) => ({
@@ -918,7 +907,7 @@ function AnnualView() {
             </div>
           </div>
 
-          <div className="grid min-h-0 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_360px]">
+          <div className={`grid min-h-0 gap-3 ${selectedMonth ? 'lg:grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1'}`}>
             <AnnualInteractiveGraph
               isLoading={isLoading}
               maxValue={annualPlan.maxGraphValue}
@@ -927,11 +916,12 @@ function AnnualView() {
               onSelectMonth={setSelectedMonthKey}
             />
 
-            <AnnualMonthFocus
-              currentNetBalance={annual?.current.netBalance ?? 0}
-              isLoading={isLoading}
-              month={selectedMonth}
-            />
+            {selectedMonth ? (
+              <AnnualMonthFocus
+                month={selectedMonth}
+                onClose={() => setSelectedMonthKey(null)}
+              />
+            ) : null}
           </div>
 
           {error ? (
@@ -1434,14 +1424,14 @@ function AnnualCompositeChart({
     onTooltipChange(nextTooltip)
   }
 
-  function selectMonth(monthKey: string) {
+  function openMonth(monthKey: string) {
     onSelectMonth(monthKey)
   }
 
   return (
     <svg
       className="h-full w-full rounded-lg bg-[#07100c]"
-      preserveAspectRatio="none"
+      preserveAspectRatio="xMidYMid meet"
       role="img"
       viewBox={`0 0 ${width} ${height}`}
       onMouseLeave={() => onTooltipChange(null)}
@@ -1489,16 +1479,13 @@ function AnnualCompositeChart({
         const expenseLabel = 'Gasto realizado'
         const investmentLabel = 'Investido realizado'
         const shouldRenderBars = !month.isFuture || expenseValue > 0 || investmentValue > 0
-        const shouldLabelFutureValues = month.isFuture && (expenseValue > 0 || investmentValue > 0)
-        const investmentLabelY = Math.max(investmentY - 8, top + 12)
-        const expenseLabelY = Math.min(expenseY + expenseHeight + 16, axisY + halfHeight - 4)
 
         return (
           <g key={month.key}>
             {isSelected ? (
               <rect
                 fill="#0e211a"
-                height={plotHeight + 36}
+                height={height - top + 2}
                 opacity="0.84"
                 stroke="#42f08f"
                 strokeOpacity="0.42"
@@ -1520,9 +1507,8 @@ function AnnualCompositeChart({
                   width={barWidth}
                   x={x - barWidth / 2}
                   y={investmentY}
-                  onClick={() => selectMonth(month.key)}
+                  onClick={() => openMonth(month.key)}
                   onMouseEnter={() => {
-                    selectMonth(month.key)
                     showTooltip({
                       detail: month.label,
                       title: investmentLabel,
@@ -1546,9 +1532,8 @@ function AnnualCompositeChart({
                   width={barWidth}
                   x={x - barWidth / 2}
                   y={expenseY}
-                  onClick={() => selectMonth(month.key)}
+                  onClick={() => openMonth(month.key)}
                   onMouseEnter={() => {
-                    selectMonth(month.key)
                     showTooltip({
                       detail: month.label,
                       title: expenseLabel,
@@ -1561,38 +1546,6 @@ function AnnualCompositeChart({
                 >
                   <title>{`${month.label} ${expenseLabel.toLowerCase()}: -${formatMoney(expenseValue)}`}</title>
                 </rect>
-
-                {shouldLabelFutureValues && investmentValue > 0 ? (
-                  <text
-                    fill="#42f08f"
-                    fontSize="12"
-                    fontWeight="800"
-                    paintOrder="stroke"
-                    stroke="#07100c"
-                    strokeWidth="4"
-                    textAnchor="middle"
-                    x={x}
-                    y={investmentLabelY}
-                  >
-                    {formatCompactMoney(investmentValue)}
-                  </text>
-                ) : null}
-
-                {shouldLabelFutureValues && expenseValue > 0 ? (
-                  <text
-                    fill="#ff8d8d"
-                    fontSize="12"
-                    fontWeight="800"
-                    paintOrder="stroke"
-                    stroke="#07100c"
-                    strokeWidth="4"
-                    textAnchor="middle"
-                    x={x}
-                    y={expenseLabelY}
-                  >
-                    -{formatCompactMoney(expenseValue)}
-                  </text>
-                ) : null}
               </>
             ) : null}
 
@@ -1617,9 +1570,8 @@ function AnnualCompositeChart({
           r="6"
           stroke="#4aa3ff"
           strokeWidth="3"
-          onClick={() => selectMonth(point.month.key)}
+          onClick={() => openMonth(point.month.key)}
           onMouseEnter={() => {
-            selectMonth(point.month.key)
             showTooltip({
               detail: point.month.label,
               title: 'Meta investimento',
@@ -1644,9 +1596,8 @@ function AnnualCompositeChart({
           r="6"
           stroke="#ffd166"
           strokeWidth="3"
-          onClick={() => selectMonth(point.month.key)}
+          onClick={() => openMonth(point.month.key)}
           onMouseEnter={() => {
-            selectMonth(point.month.key)
             showTooltip({
               detail: point.month.label,
               title: 'Meta gasto',
@@ -1805,32 +1756,20 @@ function AnnualGoalCompactInput({
 }
 
 function AnnualMonthFocus({
-  currentNetBalance,
-  isLoading,
   month,
+  onClose,
 }: {
-  currentNetBalance: number
-  isLoading: boolean
-  month: AnnualPlanMonth | null
+  month: AnnualPlanMonth
+  onClose: () => void
 }) {
-  if (isLoading) {
-    return (
-      <aside className="hidden min-h-0 rounded-lg border border-[#182721] bg-[#0b1410]/95 p-4 lg:grid lg:place-items-center">
-        <LoaderCircle className="size-6 animate-spin text-[#42f08f]" aria-hidden="true" />
-      </aside>
-    )
-  }
-
-  if (!month) {
-    return (
-      <aside className="hidden min-h-0 rounded-lg border border-[#182721] bg-[#0b1410]/95 p-4 lg:grid lg:place-items-center">
-        <EmptyState label="Selecione um mes" />
-      </aside>
-    )
-  }
-
   const hasRealizedExpense = month.summary.expenses > 0
   const hasRealizedInvestment = Math.abs(month.summary.netInvestmentContribution) > 0
+  const monthName = getMonthName(month.dateFrom) || month.label
+  const expenseDelta = month.expenseGoalLineValue - month.summary.expenses
+  const investmentDelta = month.summary.netInvestmentContribution - month.investmentGoalLineValue
+  const expenseUsage = month.expenseGoalLineValue > 0
+    ? Math.round((month.summary.expenses / month.expenseGoalLineValue) * 100)
+    : 0
 
   return (
     <aside className="hidden min-h-0 flex-col overflow-hidden rounded-lg border border-[#182721] bg-[#0b1410]/95 p-4 lg:flex">
@@ -1838,30 +1777,51 @@ function AnnualMonthFocus({
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase text-[#6f897c]">{getAnnualMonthStatus(month)}</p>
-            <h3 className="mt-1 text-3xl font-semibold capitalize text-white">{month.label}</h3>
+            <h3 className="mt-1 text-3xl font-semibold capitalize text-white">{monthName}</h3>
           </div>
-          <span className={`rounded-md px-2 py-1 text-xs font-semibold ${month.isFuture ? 'bg-[#241a0e] text-[#ffc46b]' : 'bg-[#103b2f] text-[#42f08f]'}`}>
-            {month.isFuture ? 'Meta' : month.isCurrent ? 'Atual' : 'Real'}
-          </span>
+          <button
+            className="grid size-8 shrink-0 place-items-center rounded-lg border border-[#263c34] bg-[#101a16] text-[#8ba397] transition hover:border-[#39d681] hover:text-[#d8ffe7]"
+            type="button"
+            title="Fechar detalhes"
+            onClick={onClose}
+          >
+            <X className="size-4" aria-hidden="true" />
+            <span className="sr-only">Fechar detalhes</span>
+          </button>
         </div>
 
         <div className="mt-5 grid gap-2">
           <AnnualFocusMetric
-            label="Gasto realizado"
-            value={month.isFuture && !hasRealizedExpense ? '-' : formatMoney(month.summary.expenses)}
-            tone="red"
-          />
-          <AnnualFocusMetric
-            label="Investido real"
+            label="Invest. real"
             value={month.isFuture && !hasRealizedInvestment ? '-' : formatMoney(month.summary.netInvestmentContribution)}
             tone={month.summary.netInvestmentContribution >= 0 ? 'green' : 'amber'}
           />
-          <AnnualFocusMetric label="Gasto projetado" value={formatMoney(month.projectedExpense)} tone="red" />
-          <AnnualFocusMetric label="Invest. projetado" value={formatMoney(month.projectedInvestment)} tone="green" />
           <AnnualFocusMetric
-            label={month.projectedBalance === null ? 'Saldo atual' : 'Saldo projetado'}
-            value={formatMoney(month.projectedBalance ?? currentNetBalance)}
-            tone="violet"
+            label="Gasto real"
+            value={month.isFuture && !hasRealizedExpense ? '-' : `-${formatMoney(month.summary.expenses)}`}
+            tone="red"
+          />
+          <AnnualFocusMetric label="Meta invest." value={formatMoney(month.investmentGoalLineValue)} tone="blue" />
+          <AnnualFocusMetric label="Meta gasto" value={`-${formatMoney(month.expenseGoalLineValue)}`} tone="amber" />
+          <AnnualFocusMetric
+            label={investmentDelta >= 0 ? 'Invest. acima meta' : 'Invest. falta meta'}
+            value={formatSignedMoney(investmentDelta)}
+            tone={investmentDelta >= 0 ? 'green' : 'blue'}
+          />
+          <AnnualFocusMetric
+            label={expenseDelta >= 0 ? 'Sobra meta gasto' : 'Estouro gasto'}
+            value={formatSignedMoney(expenseDelta)}
+            tone={expenseDelta >= 0 ? 'green' : 'red'}
+          />
+          <AnnualFocusMetric
+            label="Uso meta gasto"
+            value={month.expenseGoalLineValue > 0 ? `${expenseUsage}%` : '-'}
+            tone={expenseUsage > 100 ? 'red' : 'amber'}
+          />
+          <AnnualFocusMetric
+            label="Movimentos"
+            value={String(month.summary.budgetTransactionCount)}
+            tone="light"
           />
         </div>
       </div>
@@ -1894,6 +1854,14 @@ function AnnualFocusMetric({
       <p className={`truncate text-base font-semibold ${toneClass}`}>{value}</p>
     </div>
   )
+}
+
+function formatSignedMoney(value: number) {
+  if (Math.abs(value) < 0.005) {
+    return formatMoney(0)
+  }
+
+  return `${value > 0 ? '+' : '-'}${formatMoney(Math.abs(value))}`
 }
 
 function getAnnualMonthStatus(month: AnnualPlanMonth) {
