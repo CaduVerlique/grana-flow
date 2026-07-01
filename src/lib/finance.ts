@@ -46,6 +46,9 @@ export type FinanceInvestment = {
   status: string | null
   name: string
   code: string | null
+  date: string | null
+  purchaseDate: string | null
+  updatedAt: string | null
   balance: number
   amount: number
   quantity: number
@@ -102,7 +105,9 @@ export type FinanceSnapshot = {
     investmentBalance: number
     investmentContributions: number
     investmentFlow: number
+    investmentPendingSyncAmount: number
     investmentRedemptions: number
+    hasPendingInvestmentSync: boolean
     monthlyProjection: number
     netCashflow: number
     netInvestmentContribution: number
@@ -139,7 +144,10 @@ export type AnnualSnapshot = {
   current: {
     accountBalance: number
     creditBalance: number
+    investmentAmount: number
     investmentBalance: number
+    investmentPendingSyncAmount: number
+    hasPendingInvestmentSync: boolean
     netBalance: number
   }
   months: AnnualMonthSummary[]

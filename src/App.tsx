@@ -44,14 +44,22 @@ declare const __APP_VERSION__: string
 
 type IconComponent = ComponentType<SVGProps<SVGSVGElement>>
 
+type PendingHint = {
+  title: string
+}
+
+type BudgetProgressTone = 'bad' | 'caution' | 'good' | 'warning'
+type MonthProgressTone = 'active' | 'closed' | 'future' | 'last-day'
+
 type Metric = {
   label: string
   value: string
   detail: MetricComparison
   footer?: ReactNode
   icon: IconComponent
+  pending?: PendingHint
   progress?: number
-  progressTone?: 'good' | 'bad'
+  progressTone?: BudgetProgressTone
   support?: ReactNode
   tone: 'shield' | 'mint' | 'amber' | 'rose'
 }
@@ -149,17 +157,7 @@ function getPreviousMonthRange(dateFrom: string) {
   return getMonthRange(year, monthIndex - 1)
 }
 
-function getDaysUntilMonthEnd(dateFrom: string) {
-  const today = new Date()
-  const year = Number(dateFrom.slice(0, 4))
-  const monthIndex = Number(dateFrom.slice(5, 7)) - 1
-  const monthEnd = new Date(year, monthIndex + 1, 0)
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
-
-  return Math.max(Math.ceil((monthEnd.getTime() - todayStart.getTime()) / 86_400_000), 0)
-}
-
-function getMonthProgress(dateFrom: string) {
+function getMonthProgressState(dateFrom: string): { label: string; progress: number; tone: MonthProgressTone } {
   const today = new Date()
   const year = Number(dateFrom.slice(0, 4))
   const monthIndex = Number(dateFrom.slice(5, 7)) - 1
@@ -168,14 +166,40 @@ function getMonthProgress(dateFrom: string) {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
 
   if (todayStart < monthStart) {
-    return 0
+    return { label: 'Mês ainda não começou', progress: 0, tone: 'future' }
   }
 
   if (todayStart > monthEnd) {
-    return 100
+    return { label: 'Mês encerrado', progress: 100, tone: 'closed' }
   }
 
-  return Math.min((todayStart.getDate() / monthEnd.getDate()) * 100, 100)
+  if (todayStart.getTime() === monthEnd.getTime()) {
+    return { label: 'Último dia do mês', progress: 99, tone: 'last-day' }
+  }
+
+  const daysUntilMonthEnd = Math.max(Math.ceil((monthEnd.getTime() - todayStart.getTime()) / 86_400_000), 0)
+
+  return {
+    label: `${daysUntilMonthEnd} ${daysUntilMonthEnd === 1 ? 'dia' : 'dias'} até o fim do mês`,
+    progress: Math.min((todayStart.getDate() / monthEnd.getDate()) * 100, 99),
+    tone: 'active',
+  }
+}
+
+function getBudgetProgressTone(usage: number): BudgetProgressTone {
+  if (usage >= 100) {
+    return 'bad'
+  }
+
+  if (usage >= 90) {
+    return 'caution'
+  }
+
+  if (usage >= 71) {
+    return 'warning'
+  }
+
+  return 'good'
 }
 
 function getPeriodLabel(preset: DatePreset, dateFrom: string, dateTo: string) {
@@ -316,14 +340,32 @@ function App() {
   const summary = snapshot?.summary
   const previousSummary = previousSnapshot?.summary
   const expenses = summary?.expenses ?? 0
+  const investmentAmount = summary?.investmentAmount ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
   const monthlyInvestment = summary?.netInvestmentContribution ?? 0
-  const monthProgress = getMonthProgress(dateFrom)
+  const investmentPendingSyncAmount = summary?.investmentPendingSyncAmount ?? 0
+  const investmentPendingSyncTitle =
+    summary?.hasPendingInvestmentSync && investmentPendingSyncAmount > 0
+      ? `Aporte de ${formatMoney(investmentPendingSyncAmount)} aparece nas movimentações, mas a posição de investimentos retornada pela Pluggy ainda pode não ter atualizado.`
+      : null
+  const monthProgressState = getMonthProgressState(dateFrom)
+  const monthProgress = monthProgressState.progress
   const monthlyExpenseGoal = getMonthlyExpenseGoal(dateFrom)
   const hasMonthlyExpenseGoal = monthlyExpenseGoal !== null
   const limitUsage = hasMonthlyExpenseGoal ? (expenses / monthlyExpenseGoal) * 100 : 0
   const remainingLimit = (monthlyExpenseGoal ?? 0) - expenses
-  const daysUntilMonthEnd = getDaysUntilMonthEnd(dateFrom)
+  const monthProgressTextTone = {
+    active: 'text-[#42f08f]',
+    closed: 'text-[#a9b7ff]',
+    future: 'text-[#75f4dc]',
+    'last-day': 'text-[#ffd166]',
+  }[monthProgressState.tone]
+  const monthProgressBarTone = {
+    active: 'bg-[#42f08f]',
+    closed: 'bg-[#6272a4]',
+    future: 'bg-[#2d5144]',
+    'last-day': 'bg-[#ffd166]',
+  }[monthProgressState.tone]
   const categories = summary?.categories ?? []
   const periodLabel = getPeriodLabel(datePreset, dateFrom, dateTo)
   const maxCategory = Math.max(...categories.map((item) => item.total), 1)
@@ -385,7 +427,7 @@ function App() {
       detail: getMetricComparison(expenses, previousSummary?.expenses),
       icon: Target,
       progress: hasMonthlyExpenseGoal ? limitUsage : undefined,
-      progressTone: remainingLimit >= 0 ? 'good' : 'bad',
+      progressTone: hasMonthlyExpenseGoal ? getBudgetProgressTone(limitUsage) : undefined,
       support: (
         <div className="mt-4">
           {hasMonthlyExpenseGoal ? (
@@ -415,11 +457,17 @@ function App() {
       value: formatMoney(monthlyInvestment),
       detail: getMetricComparison(monthlyInvestment, previousSummary?.netInvestmentContribution, 'higher-is-good'),
       footer: (
-        <p className="mt-3 text-xs font-medium text-[#6f897c]">
-          Total acumulado: <span className="font-semibold text-[#8ba397]">{formatMoney(investmentBalance)}</span>
-        </p>
+        <div className="mt-3 space-y-1 text-xs font-medium text-[#6f897c]">
+          <p>
+            Acumulado: <span className="font-semibold text-[#d8ffe7]">{formatMoney(investmentBalance)}</span>
+          </p>
+          <p className="text-[11px]">
+            Bruto: <span className="font-semibold text-[#8ba397]">{formatMoney(investmentAmount)}</span>
+          </p>
+        </div>
       ),
       icon: PiggyBank,
+      pending: investmentPendingSyncTitle ? { title: investmentPendingSyncTitle } : undefined,
       tone: 'amber',
     },
   ]
@@ -592,13 +640,13 @@ function App() {
                 <div className="min-w-[260px]">
                   <div className="flex items-center justify-between gap-4 text-sm">
                     <span className="text-[#8ba397]">Progresso do mês</span>
-                    <span className="font-semibold text-[#42f08f]">{Math.round(monthProgress)}%</span>
+                    <span className={`font-semibold ${monthProgressTextTone}`}>{Math.round(monthProgress)}%</span>
                   </div>
                   <div className="mt-3 h-3 overflow-hidden rounded-full bg-[#17231f]">
-                    <div className="h-full rounded-full bg-[#42f08f]" style={{ width: `${monthProgress}%` }} />
+                    <div className={`h-full rounded-full ${monthProgressBarTone}`} style={{ width: `${monthProgress}%` }} />
                   </div>
-                  <p className="mt-2 text-sm font-medium text-[#6f897c]">
-                    {daysUntilMonthEnd} {daysUntilMonthEnd === 1 ? 'dia' : 'dias'} até o fim do mês
+                  <p className={`mt-2 text-sm font-semibold ${monthProgressTextTone}`}>
+                    {monthProgressState.label}
                   </p>
                 </div>
               </div>
@@ -796,7 +844,14 @@ function AnnualView() {
 
   const annualPlan = useMemo(() => buildAnnualPlan(annual, goals), [annual, goals])
   const selectedMonth = annualPlan.months.find((month) => month.key === selectedMonthKey) ?? null
-  const currentGrossAmount = (annual?.current.accountBalance ?? 0) + (annual?.current.investmentBalance ?? 0)
+  const currentInvestmentAmount = annual?.current.investmentAmount ?? annual?.current.investmentBalance ?? 0
+  const currentInvestmentBalance = annual?.current.investmentBalance ?? 0
+  const annualInvestmentPendingSyncAmount = annual?.current.investmentPendingSyncAmount ?? 0
+  const annualInvestmentPendingSyncTitle =
+    annual?.current.hasPendingInvestmentSync && annualInvestmentPendingSyncAmount > 0
+      ? `Aporte de ${formatMoney(annualInvestmentPendingSyncAmount)} aparece nas movimentações, mas a posição de investimentos retornada pela Pluggy ainda pode não ter atualizado.`
+      : null
+  const currentGrossAmount = (annual?.current.accountBalance ?? 0) + currentInvestmentAmount
   const projectedInvestmentDecember = annualPlan.projectedInvestmentTotal
 
   useEffect(() => {
@@ -848,7 +903,13 @@ function AnnualView() {
 
             <div className="hidden min-w-0 grid-cols-4 gap-2 xl:grid">
               <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="violet" />
-              <AnnualTopMetric label="Investimento atual" value={formatCompactMoney(annual?.current.investmentBalance ?? 0)} tone="green" />
+              <AnnualTopMetric
+                detail={`Bruto ${formatCompactMoney(currentInvestmentAmount)}`}
+                label="Investimento atual"
+                pending={annualInvestmentPendingSyncTitle ? { title: annualInvestmentPendingSyncTitle } : undefined}
+                value={formatCompactMoney(currentInvestmentBalance)}
+                tone="green"
+              />
               <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="red" />
               <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="blue" />
             </div>
@@ -1265,11 +1326,15 @@ function parseGoal(value: string) {
 }
 
 function AnnualTopMetric({
+  detail,
   label,
+  pending,
   tone,
   value,
 }: {
+  detail?: string
   label: string
+  pending?: PendingHint
   tone: 'amber' | 'blue' | 'cyan' | 'green' | 'red' | 'violet'
   value: string
 }) {
@@ -1291,10 +1356,28 @@ function AnnualTopMetric({
   }[tone]
 
   return (
-    <div className={`min-w-28 rounded-lg border bg-[#0d1512]/92 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${borderClass}`}>
+    <div className={`relative min-w-28 rounded-lg border bg-[#0d1512]/92 px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${borderClass}`}>
+      {pending ? <PendingDot title={pending.title} /> : null}
       <p className="truncate text-xs font-semibold uppercase text-[#6f897c]">{label}</p>
       <p className={`mt-1 truncate text-lg font-semibold ${toneClass}`}>{value}</p>
+      {detail ? <p className="mt-1 truncate text-xs font-semibold text-[#6f897c]">{detail}</p> : null}
     </div>
+  )
+}
+
+function PendingDot({ title }: PendingHint) {
+  return (
+    <span
+      aria-label={title}
+      className="group absolute bottom-3 right-3 z-20 inline-flex size-4 items-center justify-center rounded-full outline-none"
+      tabIndex={0}
+      title={title}
+    >
+      <span className="size-2.5 rounded-full bg-[#ffd166] shadow-[0_0_14px_rgba(255,209,102,0.85)]" />
+      <span className="pointer-events-none absolute right-0 top-5 w-64 rounded-md border border-[#5b4720] bg-[#12110a] px-3 py-2 text-left text-xs font-semibold leading-relaxed text-[#ffe8a3] opacity-0 shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition group-hover:opacity-100 group-focus:opacity-100">
+        {title}
+      </span>
+    </span>
   )
 }
 
@@ -2015,6 +2098,12 @@ function MetricCard({ metric }: { metric: Metric }) {
     positive: 'text-[#42f08f]',
   }[metric.detail.sentiment]
   const progressWidth = metric.progress === undefined ? 0 : Math.min(Math.max(metric.progress, 0), 100)
+  const progressTone = {
+    bad: 'bg-[#ff6b6b]',
+    caution: 'bg-[#ff9f43]',
+    good: 'bg-[#42f08f]',
+    warning: 'bg-[#ffd166]',
+  }[metric.progressTone ?? 'good']
   const tone = {
     amber: 'border-[#5a3d1d] bg-[#2a1c0d] text-[#ffc46b]',
     mint: 'border-[#24544b] bg-[#102824] text-[#75f4dc]',
@@ -2023,7 +2112,8 @@ function MetricCard({ metric }: { metric: Metric }) {
   }[metric.tone]
 
   return (
-    <article className="min-h-[154px] rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+    <article className="relative min-h-[154px] rounded-lg border border-[#203a31] bg-[#09100d]/95 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]">
+      {metric.pending ? <PendingDot title={metric.pending.title} /> : null}
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-base font-medium text-[#8ba397]">{metric.label}</p>
@@ -2037,7 +2127,7 @@ function MetricCard({ metric }: { metric: Metric }) {
         <div className="mt-4">
           <div className="h-3 overflow-hidden rounded-full bg-[#17231f]">
             <div
-              className={`h-full rounded-full ${metric.progressTone === 'bad' ? 'bg-[#ff6b6b]' : 'bg-[#42f08f]'}`}
+              className={`h-full rounded-full ${progressTone}`}
               style={{ width: `${progressWidth}%` }}
             />
           </div>

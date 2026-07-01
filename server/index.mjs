@@ -736,11 +736,88 @@ function normalizeInvestment(investment) {
     status: investment.status ?? null,
     name: investment.name ?? investment.code ?? 'Investimento',
     code: investment.code ?? null,
+    date: investment.date ?? null,
+    purchaseDate: investment.purchaseDate ?? null,
+    updatedAt: investment.updatedAt ?? null,
     balance: roundMoney(Number(investment.balance ?? 0)),
     amount: roundMoney(Number(investment.amount ?? 0)),
     quantity: Number(investment.quantity ?? 0),
     currencyCode: investment.currencyCode ?? 'BRL',
   }
+}
+
+function getDateKey(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const date = value.slice(0, 10)
+
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null
+}
+
+function getInvestmentPositionDate(investment) {
+  return getDateKey(investment.purchaseDate) ?? getDateKey(investment.date)
+}
+
+function getLatestDate(dates) {
+  return dates.filter(Boolean).sort((a, b) => a.localeCompare(b)).at(-1) ?? null
+}
+
+function getPendingInvestmentSyncAmount(transactions, investments, netInvestmentContribution) {
+  if (netInvestmentContribution <= 0) {
+    return 0
+  }
+
+  const latestContributionDate = getLatestDate(
+    transactions
+      .filter((item) => item.rawCategory === 'Investments' && item.amount < 0)
+      .map((item) => getDateKey(item.date)),
+  )
+
+  if (!latestContributionDate) {
+    return 0
+  }
+
+  const latestActivePositionDate = getLatestDate(
+    investments
+      .filter(
+        (investment) =>
+          investment.status !== 'TOTAL_WITHDRAWAL' &&
+          (Number(investment.amount ?? 0) > 0 || Number(investment.balance ?? 0) > 0),
+      )
+      .map(getInvestmentPositionDate),
+  )
+  const pendingWindowTransactions = latestActivePositionDate
+    ? transactions.filter((item) => {
+        const date = getDateKey(item.date)
+
+        return Boolean(date) && date > latestActivePositionDate
+      })
+    : transactions
+  const pendingContributions = pendingWindowTransactions
+    .filter((item) => item.rawCategory === 'Investments' && item.amount < 0)
+    .reduce((sum, item) => sum + Math.abs(item.amount), 0)
+  const pendingRedemptions = pendingWindowTransactions
+    .filter((item) => item.rawCategory === 'Investments' && item.amount > 0)
+    .reduce((sum, item) => sum + item.amount, 0)
+  const pendingNetContribution = roundMoney(pendingContributions - pendingRedemptions)
+  const hasZeroPositionAfterContribution = investments.some((investment) => {
+    const positionDate = getInvestmentPositionDate(investment)
+
+    return (
+      investment.status === 'TOTAL_WITHDRAWAL' &&
+      Number(investment.amount ?? 0) === 0 &&
+      Number(investment.balance ?? 0) === 0 &&
+      Boolean(positionDate) &&
+      positionDate >= latestContributionDate
+    )
+  })
+  const hasContributionAfterLatestPosition = !latestActivePositionDate || latestContributionDate > latestActivePositionDate
+
+  return pendingNetContribution > 0 && (hasZeroPositionAfterContribution || hasContributionAfterLatestPosition)
+    ? pendingNetContribution
+    : 0
 }
 
 function normalizeBill(bill, account) {
@@ -806,6 +883,7 @@ function buildSummary(accounts, transactions, investments, bills, dateFrom, date
   const investmentRedemptions = transactions
     .filter((item) => item.rawCategory === 'Investments' && item.amount > 0)
     .reduce((sum, item) => sum + item.amount, 0)
+  const netInvestmentContribution = investmentContributions - investmentRedemptions
   const ignoredOutflow = transactions
     .filter((item) => item.budgetAmount === 0 && item.amount < 0)
     .reduce((sum, item) => sum + Math.abs(item.amount), 0)
@@ -825,6 +903,7 @@ function buildSummary(accounts, transactions, investments, bills, dateFrom, date
     .reduce((sum, account) => sum + Number(account.balance ?? 0), 0)
   const investmentBalance = investments.reduce((sum, investment) => sum + Number(investment.balance ?? 0), 0)
   const investmentAmount = investments.reduce((sum, investment) => sum + Number(investment.amount ?? 0), 0)
+  const investmentPendingSyncAmount = getPendingInvestmentSyncAmount(transactions, investments, netInvestmentContribution)
   const activeInvestmentCount = investments.filter((investment) => investment.status !== 'TOTAL_WITHDRAWAL').length
   const currentBill = pickCurrentBill(bills, dateTo)
 
@@ -855,10 +934,12 @@ function buildSummary(accounts, transactions, investments, bills, dateFrom, date
     investmentBalance: roundMoney(investmentBalance),
     investmentContributions: roundMoney(investmentContributions),
     investmentFlow: roundMoney(investmentFlow),
+    investmentPendingSyncAmount,
     investmentRedemptions: roundMoney(investmentRedemptions),
+    hasPendingInvestmentSync: investmentPendingSyncAmount > 0,
     monthlyProjection: roundMoney(monthlyProjection),
     netCashflow: roundMoney(income - expenses),
-    netInvestmentContribution: roundMoney(investmentContributions - investmentRedemptions),
+    netInvestmentContribution: roundMoney(netInvestmentContribution),
     transferOutflow: roundMoney(transferOutflow),
     transactionCount: transactions.length,
     budgetTransactionCount: budgetExpenses.length,
@@ -1053,7 +1134,9 @@ async function getAnnualSnapshot(requestUrl) {
   })
   const currentSummary = buildSummary(accounts, transactions, investments, bills, yearStart, yearEnd)
   const accountBalance = currentSummary.accountBalance
+  const investmentAmount = currentSummary.investmentAmount
   const investmentBalance = currentSummary.investmentBalance
+  const investmentPendingSyncAmount = currentSummary.investmentPendingSyncAmount
   const creditBalance = currentSummary.creditBalance
 
   return {
@@ -1070,7 +1153,10 @@ async function getAnnualSnapshot(requestUrl) {
     current: {
       accountBalance,
       creditBalance,
+      investmentAmount,
       investmentBalance,
+      investmentPendingSyncAmount,
+      hasPendingInvestmentSync: currentSummary.hasPendingInvestmentSync,
       netBalance: roundMoney(accountBalance + investmentBalance - creditBalance),
     },
     months,
