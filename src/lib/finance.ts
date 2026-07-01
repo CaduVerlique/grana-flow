@@ -210,7 +210,7 @@ export function getCurrentMonthRange() {
 
   return {
     dateFrom: formatDateInput(new Date(today.getFullYear(), today.getMonth(), 1)),
-    dateTo: formatDateInput(today),
+    dateTo: formatDateInput(new Date(today.getFullYear(), today.getMonth() + 1, 0)),
   }
 }
 
