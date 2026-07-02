@@ -75,6 +75,68 @@ export type DaySummary = {
   total: number
 }
 
+export type RecurringMethod = 'Conta' | 'Credito'
+
+export type RecurringRule = {
+  amount: number
+  category: string
+  confidence: number | null
+  currentMonthExpectedDate: string | null
+  currentMonthStatus: 'paid' | 'pending'
+  dayOfMonth: number
+  firstSeen: string | null
+  id: string
+  key: string
+  label: string
+  lastSeen: string | null
+  method: RecurringMethod
+  merchantSource: string
+  occurrences: number
+  origin: 'detected' | 'manual'
+}
+
+export type RecurringCandidate = {
+  amount: number
+  category: string
+  date: string
+  description: string
+  id: string
+  key: string | null
+  method: RecurringMethod
+  source: string
+}
+
+export type PlannedExpenseItem = {
+  amount: number
+  category: string
+  expectedDate: string
+  key: string
+  label: string
+  method: RecurringMethod
+  paidAmount: number
+  paidTransactionId: string | null
+  remainingAmount: number
+  ruleId: string
+  status: 'paid' | 'planned'
+}
+
+export type PlannedExpenses = {
+  bankExpenses: number
+  cardExpenses: number
+  count: number
+  expenses: number
+  items: PlannedExpenseItem[]
+  paidAmount: number
+  paidCount: number
+  totalAmount: number
+}
+
+export type RecurringOverview = {
+  candidates: RecurringCandidate[]
+  ignoredCount: number
+  rules: RecurringRule[]
+}
+
 export type FinanceSnapshot = {
   generatedAt: string
   dateFrom: string
@@ -91,6 +153,10 @@ export type FinanceSnapshot = {
   investments: FinanceInvestment[]
   bills: FinanceBill[]
   transactions: FinanceTransaction[]
+  recurring: {
+    planned: PlannedExpenses
+    rules: RecurringRule[]
+  }
   summary: {
     accountBalance: number
     activeInvestmentCount: number
@@ -111,6 +177,14 @@ export type FinanceSnapshot = {
     monthlyProjection: number
     netCashflow: number
     netInvestmentContribution: number
+    plannedBankExpenses: number
+    plannedCardExpenses: number
+    plannedExpenseCount: number
+    plannedExpenseItems: PlannedExpenseItem[]
+    plannedExpensePaidAmount: number
+    plannedExpensePaidCount: number
+    plannedExpenseTotal: number
+    plannedExpenses: number
     transferOutflow: number
     transactionCount: number
     budgetTransactionCount: number
@@ -132,6 +206,9 @@ export type AnnualMonthSummary = {
     investmentContributions: number
     investmentRedemptions: number
     netInvestmentContribution: number
+    plannedExpenses: number
+    plannedExpenseCount: number
+    plannedExpensePaidCount: number
     transactionCount: number
     budgetTransactionCount: number
   }
@@ -149,8 +226,12 @@ export type AnnualSnapshot = {
     investmentPendingSyncAmount: number
     hasPendingInvestmentSync: boolean
     netBalance: number
+    plannedExpenses: number
   }
   months: AnnualMonthSummary[]
+  recurring: {
+    rules: RecurringRule[]
+  }
 }
 
 const moneyFormatter = new Intl.NumberFormat('pt-BR', {

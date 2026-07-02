@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, relative, resolve } from 'node:path'
@@ -80,7 +81,9 @@ const categoryLabels = {
 
 const budgetIgnoredCategories = new Set(['Credit card payment', 'Investments', 'Payment'])
 const incomeIgnoredCategories = new Set(['Investments', 'Same person transfer', 'Transfers'])
+const autoRecurringExcludedCategories = new Set(['Alimentacao', 'Compras', 'Delivery', 'Farmacia', 'Mercado', 'Restaurantes', 'Transporte'])
 const exchangeRateCache = new Map()
+const recurringStoreFileName = 'recurring-expenses.json'
 
 function json(response, status, data) {
   const body = JSON.stringify(data)
@@ -260,6 +263,84 @@ async function savePluggyConfig(request) {
   return getConfigStatus()
 }
 
+function getUserDataRoot() {
+  if (process.env.GRANAFLOW_CONFIG_ROOT) {
+    return resolve(process.env.GRANAFLOW_CONFIG_ROOT)
+  }
+
+  if (process.env.APPDATA) {
+    return resolve(process.env.APPDATA, appName)
+  }
+
+  return resolve(process.cwd(), '.granaflow')
+}
+
+function getRecurringStorePath() {
+  return resolve(getUserDataRoot(), recurringStoreFileName)
+}
+
+async function readRecurringStore() {
+  try {
+    const content = await readFile(getRecurringStorePath(), 'utf8')
+    const payload = JSON.parse(content)
+
+    return {
+      ignoredKeys: Array.isArray(payload.ignoredKeys) ? payload.ignoredKeys.filter((key) => typeof key === 'string') : [],
+      rules: Array.isArray(payload.rules) ? payload.rules.map(normalizeStoredRecurringRule).filter(Boolean) : [],
+      version: 1,
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return { ignoredKeys: [], rules: [], version: 1 }
+    }
+
+    throw error
+  }
+}
+
+async function writeRecurringStore(store) {
+  const storePath = getRecurringStorePath()
+
+  await mkdir(dirname(storePath), { recursive: true })
+  await writeFile(
+    storePath,
+    JSON.stringify(
+      {
+        ignoredKeys: [...new Set(store.ignoredKeys ?? [])],
+        rules: store.rules ?? [],
+        updatedAt: new Date().toISOString(),
+        version: 1,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  )
+}
+
+function normalizeStoredRecurringRule(rule) {
+  if (!rule || typeof rule !== 'object' || typeof rule.key !== 'string' || !rule.key) {
+    return null
+  }
+
+  return {
+    amount: Math.max(Number(rule.amount ?? 0), 0),
+    category: String(rule.category ?? 'Outros'),
+    createdAt: rule.createdAt ?? new Date().toISOString(),
+    dayOfMonth: Math.min(Math.max(Number(rule.dayOfMonth ?? 1), 1), 31),
+    firstSeen: rule.firstSeen ?? null,
+    id: String(rule.id ?? randomUUID()),
+    key: rule.key,
+    label: String(rule.label ?? 'Recorrente'),
+    lastSeen: rule.lastSeen ?? null,
+    method: rule.method === 'Credito' ? 'Credito' : 'Conta',
+    merchantSource: String(rule.merchantSource ?? ''),
+    occurrences: Math.max(Number(rule.occurrences ?? 1), 1),
+    origin: rule.origin === 'detected' ? 'detected' : 'manual',
+    updatedAt: rule.updatedAt ?? new Date().toISOString(),
+  }
+}
+
 function runCommand(file, args, { allowFailure = false } = {}) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(file, args, {
@@ -399,6 +480,44 @@ function shutdownApp() {
   return { ok: true }
 }
 
+async function triggerPluggyHardUpdate() {
+  const config = getConfig()
+  const apiKey = await authenticate(config)
+
+  let item
+
+  try {
+    item = await pluggyFetch(`/items/${config.itemId}`, apiKey, {
+      body: '{}',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'PATCH',
+    })
+  } catch (error) {
+    const pluggyMessage = `${error.pluggyMessage ?? ''} ${error.details ?? ''}`.toLowerCase()
+
+    if (pluggyMessage.includes('meupluggy item cant be updated')) {
+      const manualOnlyError = new Error(
+        'Este item do Meu Pluggy não aceita hard update pela API. Atualize pelo Meu Pluggy e depois use Atualizar no GranaFlow.',
+      )
+      manualOnlyError.statusCode = 409
+      manualOnlyError.code = 'MEUPLUGGY_MANUAL_UPDATE_REQUIRED'
+      manualOnlyError.details = 'A Pluggy bloqueou o update direto deste Item.'
+      manualOnlyError.manualOnly = true
+      throw manualOnlyError
+    }
+
+    throw error
+  }
+
+  return {
+    item,
+    ok: true,
+    triggeredAt: new Date().toISOString(),
+  }
+}
+
 function closeServerSoon() {
   setTimeout(() => {
     server.close(() => process.exit(0))
@@ -447,9 +566,12 @@ async function pluggyFetch(path, apiKey, init = {}) {
 
   if (!response.ok) {
     const text = await response.text()
+    const payload = parseJsonObject(text)
     const error = new Error(`Pluggy respondeu ${response.status}`)
     error.statusCode = response.status
     error.details = safeErrorDetails(text)
+    error.pluggyCode = payload?.code
+    error.pluggyMessage = payload?.message
     throw error
   }
 
@@ -492,10 +614,28 @@ async function fetchTransactions(apiKey, accountId, dateFrom, dateTo) {
 
     const page = await pluggyFetch(`/v2/transactions?${search.toString()}`, apiKey)
     transactions.push(...(page.results ?? []))
-    cursor = page.next
+    cursor = getNextTransactionCursor(page.next)
   } while (cursor)
 
   return transactions
+}
+
+function getNextTransactionCursor(next) {
+  if (!next || typeof next !== 'string') {
+    return null
+  }
+
+  if (!next.includes('=')) {
+    return next
+  }
+
+  const search = next.startsWith('?') ? next.slice(1) : next.split('?')[1]
+
+  if (!search) {
+    return next
+  }
+
+  return new URLSearchParams(search).get('after')
 }
 
 async function fetchInvestments(apiKey, itemId) {
@@ -588,6 +728,250 @@ async function normalizeTransaction(transaction, account) {
     fxRate: currency.fxRate,
     fxSource: currency.fxSource,
     fxDate: currency.fxDate,
+  }
+}
+
+function isInstallmentTransaction(transaction) {
+  return Number(transaction.totalInstallments ?? 0) > 1 || Number(transaction.installmentNumber ?? 0) > 1
+}
+
+function isRecurringEligibleTransaction(transaction) {
+  return transaction.budgetAmount < 0 && !isInstallmentTransaction(transaction)
+}
+
+function isAutoRecurringEligibleTransaction(transaction) {
+  return isRecurringEligibleTransaction(transaction) && !autoRecurringExcludedCategories.has(transaction.category)
+}
+
+function normalizeRecurringDescription(description) {
+  return String(description ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, ' ')
+    .replace(/\b\d+\s*x\s*\d+\b/g, ' ')
+    .replace(/\b\d+\s*\/\s*\d+\b/g, ' ')
+    .replace(/\b\d{3,}\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+}
+
+function getRecurringTransactionKey(transaction) {
+  const normalizedDescription = normalizeRecurringDescription(transaction.description)
+
+  if (normalizedDescription.length < 4) {
+    return null
+  }
+
+  return `${transaction.method}|${transaction.category}|${normalizedDescription}`
+}
+
+function getDateOnly(value) {
+  return typeof value === 'string' ? value.slice(0, 10) : ''
+}
+
+function getMonthKeyFromDate(value) {
+  return getDateOnly(value).slice(0, 7)
+}
+
+function getMonthIndex(monthKey) {
+  const year = Number(monthKey.slice(0, 4))
+  const month = Number(monthKey.slice(5, 7))
+
+  return year * 12 + month
+}
+
+function getRecentRecurringCutoff() {
+  const today = new Date()
+
+  return formatDate(new Date(today.getFullYear(), today.getMonth() - 4, 1))
+}
+
+function getDayOfMonth(value) {
+  return Number(getDateOnly(value).slice(8, 10)) || 1
+}
+
+function median(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+
+  if (!sorted.length) {
+    return 0
+  }
+
+  const middle = Math.floor(sorted.length / 2)
+
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
+function mostCommon(values, fallback = '') {
+  const counts = new Map()
+
+  for (const value of values) {
+    if (!value) {
+      continue
+    }
+
+    counts.set(value, (counts.get(value) ?? 0) + 1)
+  }
+
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? fallback
+}
+
+function detectRecurringRules(transactions) {
+  const groups = new Map()
+
+  for (const transaction of transactions) {
+    if (!isAutoRecurringEligibleTransaction(transaction)) {
+      continue
+    }
+
+    const key = getRecurringTransactionKey(transaction)
+
+    if (!key) {
+      continue
+    }
+
+    if (!groups.has(key)) {
+      groups.set(key, [])
+    }
+
+    groups.get(key).push(transaction)
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => buildDetectedRecurringRule(key, group))
+    .filter(Boolean)
+    .sort((a, b) => b.amount - a.amount)
+}
+
+function buildDetectedRecurringRule(key, group) {
+  const sorted = [...group].sort((a, b) => getDateOnly(a.date).localeCompare(getDateOnly(b.date)))
+  const monthIndexes = [...new Set(sorted.map((item) => getMonthIndex(getMonthKeyFromDate(item.date))))].sort((a, b) => a - b)
+  const monthCount = monthIndexes.length
+
+  if (monthCount < 3) {
+    return null
+  }
+
+  const monthIntervals = monthIndexes.slice(1).map((monthIndex, index) => monthIndex - monthIndexes[index])
+  const medianInterval = median(monthIntervals)
+  const latestDate = getDateOnly(sorted.at(-1).date)
+  const recentCutoff = getRecentRecurringCutoff()
+
+  if (medianInterval > 1.25 || !monthIntervals.includes(1) || latestDate < recentCutoff) {
+    return null
+  }
+
+  const amounts = sorted.map((item) => Math.abs(item.budgetAmount))
+  const amount = roundMoney(median(amounts))
+  const maxDeviation = amount > 0 ? Math.max(...amounts.map((value) => Math.abs(value - amount))) / amount : 1
+
+  if (maxDeviation > 0.35) {
+    return null
+  }
+
+  const latest = sorted.at(-1)
+
+  return {
+    amount,
+    category: mostCommon(sorted.map((item) => item.category), latest.category),
+    confidence: roundRate(Math.min(0.95, 0.48 + monthCount * 0.1 - Math.min(maxDeviation, 0.5) * 0.2)),
+    createdAt: new Date().toISOString(),
+    dayOfMonth: Math.round(median(sorted.map((item) => getDayOfMonth(item.date)))),
+    firstSeen: getDateOnly(sorted[0].date),
+    id: `detected:${key}`,
+    key,
+    label: latest.description,
+    lastSeen: getDateOnly(latest.date),
+    method: mostCommon(sorted.map((item) => item.method), latest.method),
+    merchantSource: mostCommon(sorted.map((item) => item.source), latest.source),
+    occurrences: sorted.length,
+    origin: 'detected',
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function createManualRecurringRuleFromTransaction(transaction) {
+  const normalizedTransaction = {
+    ...transaction,
+    budgetAmount: Number(transaction.budgetAmount ?? -Math.abs(Number(transaction.amount ?? 0))),
+    category: transaction.category ?? 'Outros',
+    date: transaction.date,
+    description: transaction.description ?? 'Recorrente',
+    method: transaction.method === 'Credito' ? 'Credito' : 'Conta',
+    source: transaction.source ?? '',
+  }
+  const key = getRecurringTransactionKey(normalizedTransaction)
+
+  if (!key || !isRecurringEligibleTransaction(normalizedTransaction)) {
+    const error = new Error('Essa movimentacao nao parece elegivel para recorrencia.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const now = new Date().toISOString()
+
+  return {
+    amount: roundMoney(Math.abs(Number(normalizedTransaction.budgetAmount))),
+    category: normalizedTransaction.category,
+    createdAt: now,
+    dayOfMonth: getDayOfMonth(normalizedTransaction.date),
+    firstSeen: getDateOnly(normalizedTransaction.date),
+    id: randomUUID(),
+    key,
+    label: normalizedTransaction.description,
+    lastSeen: getDateOnly(normalizedTransaction.date),
+    method: normalizedTransaction.method,
+    merchantSource: normalizedTransaction.source,
+    occurrences: 1,
+    origin: 'manual',
+    updatedAt: now,
+  }
+}
+
+function mergeRecurringRules(transactions, store) {
+  const ignoredKeys = new Set(store.ignoredKeys ?? [])
+  const manualRules = (store.rules ?? []).filter((rule) => rule.origin === 'manual')
+  const manualKeys = new Set(manualRules.map((rule) => rule.key))
+  const detectedRules = detectRecurringRules(transactions).filter(
+    (rule) => !ignoredKeys.has(rule.key) && !manualKeys.has(rule.key),
+  )
+
+  return [...manualRules, ...detectedRules].sort((a, b) => b.amount - a.amount)
+}
+
+function serializeRecurringRule(rule, currentMonthItem = null) {
+  return {
+    amount: roundMoney(rule.amount),
+    category: rule.category,
+    confidence: rule.confidence ?? null,
+    currentMonthExpectedDate: currentMonthItem?.expectedDate ?? null,
+    currentMonthStatus: currentMonthItem?.status === 'paid' ? 'paid' : 'pending',
+    dayOfMonth: rule.dayOfMonth,
+    firstSeen: rule.firstSeen,
+    id: rule.id,
+    key: rule.key,
+    label: rule.label,
+    lastSeen: rule.lastSeen,
+    method: rule.method,
+    merchantSource: rule.merchantSource,
+    occurrences: rule.occurrences,
+    origin: rule.origin,
+  }
+}
+
+function serializeRecurringCandidate(transaction) {
+  return {
+    amount: roundMoney(Math.abs(transaction.budgetAmount)),
+    category: transaction.category,
+    date: getDateOnly(transaction.date),
+    description: transaction.description,
+    id: transaction.id,
+    key: getRecurringTransactionKey(transaction),
+    method: transaction.method,
+    source: transaction.source,
   }
 }
 
@@ -862,7 +1246,143 @@ function markCreditCardPaymentCounterparts(transactions) {
   }
 }
 
-function buildSummary(accounts, transactions, investments, bills, dateFrom, dateTo) {
+function getMonthsInRange(dateFrom, dateTo) {
+  const months = []
+  const start = new Date(Number(dateFrom.slice(0, 4)), Number(dateFrom.slice(5, 7)) - 1, 1)
+  const end = new Date(Number(dateTo.slice(0, 4)), Number(dateTo.slice(5, 7)) - 1, 1)
+
+  for (const cursor = new Date(start); cursor <= end; cursor.setMonth(cursor.getMonth() + 1)) {
+    months.push({
+      key: `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`,
+      month: cursor.getMonth(),
+      year: cursor.getFullYear(),
+    })
+  }
+
+  return months
+}
+
+function getExpectedRecurringDate(rule, month) {
+  const lastDay = new Date(month.year, month.month + 1, 0).getDate()
+  const day = Math.min(Math.max(Number(rule.dayOfMonth ?? 1), 1), lastDay)
+
+  return formatDate(new Date(month.year, month.month, day))
+}
+
+function isClosedMonth(month) {
+  const today = new Date()
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const monthEnd = new Date(month.year, month.month + 1, 0)
+
+  return monthEnd < todayStart
+}
+
+function hasRuleStarted(rule, monthKey) {
+  if (!rule.firstSeen) {
+    return true
+  }
+
+  return monthKey >= String(rule.firstSeen).slice(0, 7)
+}
+
+function findPaidRecurringTransaction(rule, transactions, expectedDate, usedTransactionIds) {
+  const candidates = transactions
+    .filter((transaction) => {
+      if (usedTransactionIds.has(transaction.id) || !isRecurringEligibleTransaction(transaction)) {
+        return false
+      }
+
+      return getRecurringTransactionKey(transaction) === rule.key
+    })
+    .map((transaction) => {
+      const amount = Math.abs(transaction.budgetAmount)
+      const amountDistance = Math.abs(amount - rule.amount)
+      const dayDistance = Math.abs(new Date(`${getDateOnly(transaction.date)}T12:00:00Z`) - new Date(`${expectedDate}T12:00:00Z`))
+
+      return { amount, amountDistance, dayDistance, transaction }
+    })
+    .sort((a, b) => a.dayDistance - b.dayDistance || a.amountDistance - b.amountDistance)
+
+  if (!candidates.length) {
+    return null
+  }
+
+  const tolerance = Math.max(10, rule.amount * 0.45)
+  const match = candidates.find((candidate) => candidate.amountDistance <= tolerance) ?? (candidates.length === 1 ? candidates[0] : null)
+
+  return match?.transaction ?? null
+}
+
+function buildPlannedExpenses(rules, transactions, dateFrom, dateTo) {
+  const usedTransactionIds = new Set()
+  const items = []
+
+  for (const month of getMonthsInRange(dateFrom, dateTo)) {
+    for (const rule of rules) {
+      if (!hasRuleStarted(rule, month.key)) {
+        continue
+      }
+
+      const expectedDate = getExpectedRecurringDate(rule, month)
+
+      if (expectedDate < dateFrom || expectedDate > dateTo) {
+        continue
+      }
+
+      const paidTransaction = findPaidRecurringTransaction(rule, transactions, expectedDate, usedTransactionIds)
+      const paidAmount = paidTransaction ? Math.abs(paidTransaction.budgetAmount) : 0
+
+      if (paidTransaction) {
+        usedTransactionIds.add(paidTransaction.id)
+      }
+
+      if (!paidTransaction && isClosedMonth(month)) {
+        continue
+      }
+
+      items.push({
+        amount: roundMoney(rule.amount),
+        category: rule.category,
+        expectedDate,
+        key: rule.key,
+        label: rule.label,
+        method: paidTransaction?.method ?? rule.method,
+        paidAmount: roundMoney(paidAmount),
+        paidTransactionId: paidTransaction?.id ?? null,
+        remainingAmount: paidTransaction ? 0 : roundMoney(rule.amount),
+        ruleId: rule.id,
+        status: paidTransaction ? 'paid' : 'planned',
+      })
+    }
+  }
+
+  const plannedItems = items.filter((item) => item.status === 'planned')
+  const paidItems = items.filter((item) => item.status === 'paid')
+
+  return {
+    bankExpenses: roundMoney(plannedItems.filter((item) => item.method !== 'Credito').reduce((sum, item) => sum + item.remainingAmount, 0)),
+    cardExpenses: roundMoney(plannedItems.filter((item) => item.method === 'Credito').reduce((sum, item) => sum + item.remainingAmount, 0)),
+    count: items.length,
+    expenses: roundMoney(plannedItems.reduce((sum, item) => sum + item.remainingAmount, 0)),
+    items,
+    paidAmount: roundMoney(paidItems.reduce((sum, item) => sum + item.paidAmount, 0)),
+    paidCount: paidItems.length,
+    totalAmount: roundMoney(items.reduce((sum, item) => sum + item.amount, 0)),
+  }
+}
+
+const emptyPlannedExpenses = {
+  bankExpenses: 0,
+  cardExpenses: 0,
+  count: 0,
+  expenses: 0,
+  items: [],
+  paidAmount: 0,
+  paidCount: 0,
+  totalAmount: 0,
+}
+
+function buildSummary(accounts, transactions, investments, bills, dateFrom, dateTo, plannedExpenses = emptyPlannedExpenses) {
   const budgetExpenses = transactions.filter((item) => item.budgetAmount < 0)
   const expenses = budgetExpenses.reduce((sum, item) => sum + Math.abs(item.budgetAmount), 0)
   const income = transactions
@@ -940,6 +1460,14 @@ function buildSummary(accounts, transactions, investments, bills, dateFrom, date
     monthlyProjection: roundMoney(monthlyProjection),
     netCashflow: roundMoney(income - expenses),
     netInvestmentContribution: roundMoney(netInvestmentContribution),
+    plannedBankExpenses: plannedExpenses.bankExpenses,
+    plannedCardExpenses: plannedExpenses.cardExpenses,
+    plannedExpenseCount: plannedExpenses.count,
+    plannedExpenseItems: plannedExpenses.items,
+    plannedExpensePaidAmount: plannedExpenses.paidAmount,
+    plannedExpensePaidCount: plannedExpenses.paidCount,
+    plannedExpenseTotal: plannedExpenses.totalAmount,
+    plannedExpenses: plannedExpenses.expenses,
     transferOutflow: roundMoney(transferOutflow),
     transactionCount: transactions.length,
     budgetTransactionCount: budgetExpenses.length,
@@ -1004,13 +1532,32 @@ function safeErrorDetails(text) {
   return text.replace(/[A-Za-z0-9_-]{24,}/g, '[redacted]').slice(0, 500)
 }
 
-async function getSnapshot(requestUrl) {
-  const config = getConfig()
-  const today = new Date()
-  const defaultTo = formatDate(today)
-  const defaultFrom = formatDate(new Date(today.getFullYear(), today.getMonth(), 1))
-  const dateFrom = assertDate(requestUrl.searchParams.get('dateFrom'), defaultFrom)
-  const dateTo = assertDate(requestUrl.searchParams.get('dateTo'), defaultTo)
+function parseJsonObject(text) {
+  try {
+    const payload = JSON.parse(text)
+
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null
+  } catch {
+    return null
+  }
+}
+
+function filterTransactionsByDate(transactions, dateFrom, dateTo) {
+  return transactions.filter((transaction) => {
+    const date = getDateOnly(transaction.date)
+
+    return date >= dateFrom && date <= dateTo
+  })
+}
+
+function getRecurringHistoryStart(dateFrom) {
+  const year = Number(dateFrom.slice(0, 4))
+  const monthIndex = Number(dateFrom.slice(5, 7)) - 1
+
+  return formatDate(new Date(year - 1, monthIndex, 1))
+}
+
+async function fetchItemAccountsAndTransactions(config, dateFrom, dateTo) {
   const apiKey = await authenticate(config)
   const [item, accountsPayload] = await Promise.all([
     pluggyFetch(`/items/${config.itemId}`, apiKey),
@@ -1033,12 +1580,140 @@ async function getSnapshot(requestUrl) {
   )
   const transactions = transactionPages.flat().sort((a, b) => b.date.localeCompare(a.date))
   markCreditCardPaymentCounterparts(transactions)
+
+  return { accounts, apiKey, item, transactions }
+}
+
+async function fetchInvestmentsAndBills(apiKey, config, accounts) {
   const [investmentPayload, billPages] = await Promise.all([
     fetchInvestments(apiKey, config.itemId),
     Promise.all(accounts.filter((account) => account.type === 'CREDIT').map((account) => fetchBills(apiKey, account.id).then((bills) => bills.map((bill) => normalizeBill(bill, account))))),
   ])
-  const investments = investmentPayload.map(normalizeInvestment)
-  const bills = billPages.flat().sort((a, b) => (b.dueDate ?? '').localeCompare(a.dueDate ?? ''))
+
+  return {
+    bills: billPages.flat().sort((a, b) => (b.dueDate ?? '').localeCompare(a.dueDate ?? '')),
+    investments: investmentPayload.map(normalizeInvestment),
+  }
+}
+
+async function getRecurringContext(transactions) {
+  const store = await readRecurringStore()
+  const rules = mergeRecurringRules(transactions, store)
+
+  return { rules, store }
+}
+
+async function getRecurringOverview(requestUrl) {
+  const config = getConfig()
+  const today = new Date()
+  const requestedYear = requestUrl.searchParams.get('year') ?? String(today.getFullYear())
+
+  if (!/^\d{4}$/.test(requestedYear)) {
+    const error = new Error('Use ano no formato YYYY.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const year = Number(requestedYear)
+  const yearStart = `${year}-01-01`
+  const yearEnd = `${year}-12-31`
+  const historyFrom = getRecurringHistoryStart(yearStart)
+  const { transactions } = await fetchItemAccountsAndTransactions(config, historyFrom, yearEnd)
+  const { rules, store } = await getRecurringContext(transactions)
+  const currentMonthStart = formatDate(new Date(today.getFullYear(), today.getMonth(), 1))
+  const currentMonthEnd = formatDate(new Date(today.getFullYear(), today.getMonth() + 1, 0))
+  const currentMonthTransactions = filterTransactionsByDate(transactions, currentMonthStart, currentMonthEnd)
+  const currentMonthPlanned = buildPlannedExpenses(rules, currentMonthTransactions, currentMonthStart, currentMonthEnd)
+  const currentMonthItemsByKey = new Map(currentMonthPlanned.items.map((item) => [item.key, item]))
+  const activeKeys = new Set(rules.map((rule) => rule.key))
+  const seenCandidateKeys = new Set()
+  const candidates = []
+
+  for (const transaction of transactions) {
+    if (!isRecurringEligibleTransaction(transaction)) {
+      continue
+    }
+
+    const key = getRecurringTransactionKey(transaction)
+
+    if (!key || activeKeys.has(key) || seenCandidateKeys.has(key)) {
+      continue
+    }
+
+    seenCandidateKeys.add(key)
+    candidates.push(serializeRecurringCandidate(transaction))
+
+    if (candidates.length >= 48) {
+      break
+    }
+  }
+
+  return {
+    candidates,
+    ignoredCount: store.ignoredKeys.length,
+    rules: rules.map((rule) => serializeRecurringRule(rule, currentMonthItemsByKey.get(rule.key))),
+  }
+}
+
+async function addRecurringRule(request) {
+  const body = await readJsonBody(request)
+  const transaction = body.transaction
+
+  if (!transaction || typeof transaction !== 'object') {
+    const error = new Error('Envie uma movimentacao para criar a recorrencia.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const store = await readRecurringStore()
+  const rule = createManualRecurringRuleFromTransaction(transaction)
+
+  store.rules = [...(store.rules ?? []).filter((item) => item.key !== rule.key), rule]
+  store.ignoredKeys = (store.ignoredKeys ?? []).filter((key) => key !== rule.key)
+  await writeRecurringStore(store)
+
+  return { rule: serializeRecurringRule(rule) }
+}
+
+async function removeRecurringRule(request) {
+  const body = await readJsonBody(request)
+  const key = typeof body.key === 'string' ? body.key : null
+  const id = typeof body.id === 'string' ? body.id : null
+
+  if (!key && !id) {
+    const error = new Error('Informe a recorrencia que deve ser removida.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const store = await readRecurringStore()
+  const removedRule = (store.rules ?? []).find((rule) => rule.id === id || rule.key === key)
+  const removedKey = key ?? removedRule?.key
+
+  store.rules = (store.rules ?? []).filter((rule) => rule.id !== id && rule.key !== key)
+
+  if (removedKey) {
+    store.ignoredKeys = [...new Set([...(store.ignoredKeys ?? []), removedKey])]
+  }
+
+  await writeRecurringStore(store)
+
+  return { ok: true }
+}
+
+async function getSnapshot(requestUrl) {
+  const config = getConfig()
+  const today = new Date()
+  const defaultTo = formatDate(today)
+  const defaultFrom = formatDate(new Date(today.getFullYear(), today.getMonth(), 1))
+  const dateFrom = assertDate(requestUrl.searchParams.get('dateFrom'), defaultFrom)
+  const dateTo = assertDate(requestUrl.searchParams.get('dateTo'), defaultTo)
+  const historyFrom = getRecurringHistoryStart(dateFrom)
+  const { accounts, apiKey, item, transactions: historyTransactions } = await fetchItemAccountsAndTransactions(config, historyFrom, dateTo)
+  const transactions = filterTransactionsByDate(historyTransactions, dateFrom, dateTo)
+  const { rules } = await getRecurringContext(historyTransactions)
+  const plannedExpenses = buildPlannedExpenses(rules, transactions, dateFrom, dateTo)
+  const { bills, investments } = await fetchInvestmentsAndBills(apiKey, config, accounts)
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1056,7 +1731,11 @@ async function getSnapshot(requestUrl) {
     investments,
     bills,
     transactions,
-    summary: buildSummary(accounts, transactions, investments, bills, dateFrom, dateTo),
+    recurring: {
+      planned: plannedExpenses,
+      rules: rules.map(serializeRecurringRule),
+    },
+    summary: buildSummary(accounts, transactions, investments, bills, dateFrom, dateTo, plannedExpenses),
   }
 }
 
@@ -1074,34 +1753,11 @@ async function getAnnualSnapshot(requestUrl) {
   const year = Number(requestedYear)
   const yearStart = `${year}-01-01`
   const yearEnd = `${year}-12-31`
-  const apiKey = await authenticate(config)
-  const [item, accountsPayload] = await Promise.all([
-    pluggyFetch(`/items/${config.itemId}`, apiKey),
-    pluggyFetch(`/accounts?itemId=${config.itemId}`, apiKey),
-  ])
-  const accounts = (accountsPayload.results ?? []).map((account) => ({
-    id: account.id,
-    type: account.type,
-    subtype: account.subtype,
-    name: account.name,
-    marketingName: account.marketingName,
-    balance: Number(account.balance ?? 0),
-    currencyCode: account.currencyCode ?? 'BRL',
-  }))
-  const transactionPages = await Promise.all(
-    accounts.map(async (account) => {
-      const results = await fetchTransactions(apiKey, account.id, yearStart, yearEnd)
-      return Promise.all(results.map((transaction) => normalizeTransaction(transaction, account)))
-    }),
-  )
-  const transactions = transactionPages.flat().sort((a, b) => b.date.localeCompare(a.date))
-  markCreditCardPaymentCounterparts(transactions)
-  const [investmentPayload, billPages] = await Promise.all([
-    fetchInvestments(apiKey, config.itemId),
-    Promise.all(accounts.filter((account) => account.type === 'CREDIT').map((account) => fetchBills(apiKey, account.id).then((bills) => bills.map((bill) => normalizeBill(bill, account))))),
-  ])
-  const investments = investmentPayload.map(normalizeInvestment)
-  const bills = billPages.flat().sort((a, b) => (b.dueDate ?? '').localeCompare(a.dueDate ?? ''))
+  const historyFrom = getRecurringHistoryStart(yearStart)
+  const { accounts, apiKey, item, transactions: historyTransactions } = await fetchItemAccountsAndTransactions(config, historyFrom, yearEnd)
+  const transactions = filterTransactionsByDate(historyTransactions, yearStart, yearEnd)
+  const { rules } = await getRecurringContext(historyTransactions)
+  const { bills, investments } = await fetchInvestmentsAndBills(apiKey, config, accounts)
   const months = Array.from({ length: 12 }, (_, index) => {
     const month = index + 1
     const monthStart = `${year}-${String(month).padStart(2, '0')}-01`
@@ -1110,7 +1766,8 @@ async function getAnnualSnapshot(requestUrl) {
       const date = transaction.date.slice(0, 10)
       return date >= monthStart && date <= monthEnd
     })
-    const summary = buildSummary(accounts, monthTransactions, investments, bills, monthStart, monthEnd)
+    const plannedExpenses = buildPlannedExpenses(rules, monthTransactions, monthStart, monthEnd)
+    const summary = buildSummary(accounts, monthTransactions, investments, bills, monthStart, monthEnd, plannedExpenses)
     const isFuture = new Date(`${monthStart}T12:00:00`) > new Date(`${formatDate(today)}T12:00:00`)
     const isCurrent = today.getFullYear() === year && today.getMonth() + 1 === month
 
@@ -1129,10 +1786,14 @@ async function getAnnualSnapshot(requestUrl) {
         netInvestmentContribution: summary.netInvestmentContribution,
         transactionCount: summary.transactionCount,
         budgetTransactionCount: summary.budgetTransactionCount,
+        plannedExpenses: summary.plannedExpenses,
+        plannedExpenseCount: summary.plannedExpenseCount,
+        plannedExpensePaidCount: summary.plannedExpensePaidCount,
       },
     }
   })
-  const currentSummary = buildSummary(accounts, transactions, investments, bills, yearStart, yearEnd)
+  const currentPlannedExpenses = buildPlannedExpenses(rules, transactions, yearStart, yearEnd)
+  const currentSummary = buildSummary(accounts, transactions, investments, bills, yearStart, yearEnd, currentPlannedExpenses)
   const accountBalance = currentSummary.accountBalance
   const investmentAmount = currentSummary.investmentAmount
   const investmentBalance = currentSummary.investmentBalance
@@ -1158,8 +1819,12 @@ async function getAnnualSnapshot(requestUrl) {
       investmentPendingSyncAmount,
       hasPendingInvestmentSync: currentSummary.hasPendingInvestmentSync,
       netBalance: roundMoney(accountBalance + investmentBalance - creditBalance),
+      plannedExpenses: currentSummary.plannedExpenses,
     },
     months,
+    recurring: {
+      rules: rules.map(serializeRecurringRule),
+    },
   }
 }
 
@@ -1205,6 +1870,26 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (requestUrl.pathname === '/api/recurring' && request.method === 'GET') {
+      json(response, 200, await getRecurringOverview(requestUrl))
+      return
+    }
+
+    if (requestUrl.pathname === '/api/recurring/rules' && request.method === 'POST') {
+      json(response, 200, await addRecurringRule(request))
+      return
+    }
+
+    if (requestUrl.pathname === '/api/recurring/remove' && request.method === 'POST') {
+      json(response, 200, await removeRecurringRule(request))
+      return
+    }
+
+    if (requestUrl.pathname === '/api/pluggy/hard-update' && request.method === 'POST') {
+      json(response, 200, await triggerPluggyHardUpdate())
+      return
+    }
+
     if (requestUrl.pathname === '/api/pluggy/snapshot') {
       json(response, 200, await getSnapshot(requestUrl))
       return
@@ -1222,8 +1907,10 @@ const server = createServer(async (request, response) => {
     json(response, 404, { error: 'Endpoint nao encontrado.' })
   } catch (error) {
     json(response, error.statusCode ?? 500, {
+      code: error.code ?? null,
       error: error.message || 'Erro inesperado.',
       details: error.details ?? null,
+      manualOnly: Boolean(error.manualOnly),
     })
   }
 })

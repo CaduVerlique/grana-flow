@@ -12,8 +12,10 @@ import {
   LoaderCircle,
   Minus,
   PiggyBank,
+  Plus,
   Power,
   RefreshCw,
+  Repeat,
   Save,
   Search,
   Settings,
@@ -23,6 +25,7 @@ import {
   Trash2,
   Wallet,
   X,
+  Zap,
 } from 'lucide-react'
 import {
   formatCompactMoney,
@@ -38,6 +41,9 @@ import {
   type FinanceAccount,
   type FinanceSnapshot,
   type FinanceTransaction,
+  type RecurringCandidate,
+  type RecurringOverview,
+  type RecurringRule,
 } from './lib/finance'
 
 declare const __APP_VERSION__: string
@@ -46,6 +52,20 @@ type IconComponent = ComponentType<SVGProps<SVGSVGElement>>
 
 type PendingHint = {
   title: string
+}
+
+type HardUpdateState = {
+  cooldownLabel: string | null
+  isCoolingDown: boolean
+  isHardUpdating: boolean
+  triggerHardUpdate: () => Promise<void>
+}
+
+type HardUpdateErrorPayload = {
+  code?: string | null
+  details?: string | null
+  error?: string | null
+  manualOnly?: boolean
 }
 
 type BudgetProgressTone = 'bad' | 'caution' | 'good' | 'warning'
@@ -95,6 +115,8 @@ type AnnualGoal = {
 type AnnualGoals = Record<string, AnnualGoal>
 
 const monthRange = getCurrentMonthRange()
+const hardUpdateCooldownMs = 5 * 60 * 1000
+const hardUpdateCooldownStorageKey = 'granaflow:hard-update-cooldown-until'
 const monthOptions = Array.from({ length: 12 }, (_, index) => ({
   label: new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(new Date(2026, index, 1)),
   value: index,
@@ -120,6 +142,68 @@ function getMonthlyExpenseGoal(dateFrom: string) {
     return expenseGoal > 0 ? expenseGoal : null
   } catch {
     return null
+  }
+}
+
+function getStoredHardUpdateCooldownUntil() {
+  const stored = Number(window.localStorage.getItem(hardUpdateCooldownStorageKey))
+
+  return Number.isFinite(stored) ? stored : 0
+}
+
+function formatCooldown(ms: number) {
+  const totalSeconds = Math.max(Math.ceil(ms / 1000), 0)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function useHardUpdate(): HardUpdateState {
+  const [cooldownUntil, setCooldownUntil] = useState(getStoredHardUpdateCooldownUntil)
+  const [now, setNow] = useState(Date.now())
+  const [isHardUpdating, setIsHardUpdating] = useState(false)
+  const cooldownRemaining = Math.max(cooldownUntil - now, 0)
+  const isCoolingDown = cooldownRemaining > 0
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+
+    return () => window.clearInterval(interval)
+  }, [])
+
+  async function triggerHardUpdate() {
+    if (isCoolingDown || isHardUpdating) {
+      return
+    }
+
+    setIsHardUpdating(true)
+
+    try {
+      const response = await fetch('/api/pluggy/hard-update', { method: 'POST' })
+      const payload = (await response.json()) as HardUpdateErrorPayload
+
+      if (!response.ok) {
+        const message = payload.details ? `${payload.error ?? 'Hard update indisponível.'} ${payload.details}` : payload.error
+        const error = new Error(message ?? 'Não foi possível solicitar o hard update.') as Error & { manualOnly?: boolean }
+        error.manualOnly = Boolean(payload.manualOnly)
+        throw error
+      }
+
+      const nextCooldownUntil = Date.now() + hardUpdateCooldownMs
+      window.localStorage.setItem(hardUpdateCooldownStorageKey, String(nextCooldownUntil))
+      setCooldownUntil(nextCooldownUntil)
+    } finally {
+      setIsHardUpdating(false)
+      setNow(Date.now())
+    }
+  }
+
+  return {
+    cooldownLabel: isCoolingDown ? formatCooldown(cooldownRemaining) : null,
+    isCoolingDown,
+    isHardUpdating,
+    triggerHardUpdate,
   }
 }
 
@@ -276,9 +360,11 @@ function App() {
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null)
   const [isConfigOpen, setIsConfigOpen] = useState(false)
   const [isAccountsMenuOpen, setIsAccountsMenuOpen] = useState(false)
+  const [isRecurringMenuOpen, setIsRecurringMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const hardUpdate = useHardUpdate()
 
   const loadConfigStatus = useCallback(async () => {
     try {
@@ -340,6 +426,16 @@ function App() {
   const summary = snapshot?.summary
   const previousSummary = previousSnapshot?.summary
   const expenses = summary?.expenses ?? 0
+  const plannedExpenses = summary?.plannedExpenses ?? 0
+  const plannedExpenseCount = summary?.plannedExpenseCount ?? 0
+  const plannedExpensePaidCount = summary?.plannedExpensePaidCount ?? 0
+  const plannedExpenseItems = summary?.plannedExpenseItems ?? []
+  const plannedCardExpenses = summary?.plannedCardExpenses ?? 0
+  const plannedBankExpenses = summary?.plannedBankExpenses ?? 0
+  const plannedCardExpenseCount = plannedExpenseItems.filter((item) => item.method === 'Credito').length
+  const plannedBankExpenseCount = plannedExpenseItems.filter((item) => item.method !== 'Credito').length
+  const plannedCardExpensePaidCount = plannedExpenseItems.filter((item) => item.method === 'Credito' && item.status === 'paid').length
+  const plannedBankExpensePaidCount = plannedExpenseItems.filter((item) => item.method !== 'Credito' && item.status === 'paid').length
   const investmentAmount = summary?.investmentAmount ?? 0
   const investmentBalance = summary?.investmentBalance ?? 0
   const monthlyInvestment = summary?.netInvestmentContribution ?? 0
@@ -411,6 +507,13 @@ function App() {
       label: 'Gastos em crédito',
       value: formatMoney(summary?.cardExpenses ?? 0),
       detail: getMetricComparison(summary?.cardExpenses ?? 0, previousSummary?.cardExpenses),
+      footer: (
+        <PlannedExpenseNote
+          amount={plannedCardExpenses}
+          count={plannedCardExpenseCount}
+          paidCount={plannedCardExpensePaidCount}
+        />
+      ),
       icon: CreditCard,
       tone: 'rose',
     },
@@ -418,6 +521,13 @@ function App() {
       label: 'Gastos em débito',
       value: formatMoney(summary?.bankExpenses ?? 0),
       detail: getMetricComparison(summary?.bankExpenses ?? 0, previousSummary?.bankExpenses),
+      footer: (
+        <PlannedExpenseNote
+          amount={plannedBankExpenses}
+          count={plannedBankExpenseCount}
+          paidCount={plannedBankExpensePaidCount}
+        />
+      ),
       icon: Landmark,
       tone: 'mint',
     },
@@ -518,6 +628,15 @@ function App() {
     window.history.replaceState(null, '', `${nextUrl.pathname}${nextUrl.search}`)
   }
 
+  async function runMonthlyHardUpdate() {
+    try {
+      await hardUpdate.triggerHardUpdate()
+      void loadSnapshot(false)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Nao foi possivel solicitar o hard update.')
+    }
+  }
+
   return (
     <main className={`${activeView === 'annual' ? 'flex h-screen flex-col overflow-hidden' : 'min-h-screen'} bg-[#070a09] text-[#edf7ef]`}>
       <header className="shrink-0 border-b border-[#17231f] bg-[#0a0f0d]">
@@ -557,6 +676,14 @@ function App() {
                   isOpen={isAccountsMenuOpen}
                   onToggle={() => setIsAccountsMenuOpen((current) => !current)}
                 />
+                <button
+                  type="button"
+                  onClick={() => setIsRecurringMenuOpen(true)}
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-[#2f4c41] bg-[#10211b] px-4 text-sm font-semibold text-[#d8ffe7] transition hover:border-[#ffb15f] hover:text-[#ffe0b8]"
+                >
+                  <Repeat className="size-4 text-[#ffb15f]" aria-hidden="true" />
+                  Recorrentes
+                </button>
                 <DatePresetControl preset={datePreset} onPresetChange={applyPreset} />
                 {datePreset === 'custom' ? (
                   <>
@@ -571,6 +698,22 @@ function App() {
                 >
                   <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
                   Atualizar
+                </button>
+                <button
+                  className={`inline-flex h-11 items-center justify-center gap-2 rounded-lg border px-4 text-sm font-semibold transition ${
+                    hardUpdate.isCoolingDown || hardUpdate.isHardUpdating
+                      ? 'cursor-not-allowed border-[#263c34] bg-[#101a16] text-[#6f897c]'
+                      : 'border-[#5b4720] bg-[#1b140d] text-[#ffe0b8] hover:border-[#ffd166] hover:text-[#ffd166]'
+                  }`}
+                  disabled={hardUpdate.isCoolingDown || hardUpdate.isHardUpdating}
+                  type="button"
+                  onClick={() => void runMonthlyHardUpdate()}
+                >
+                  <Zap
+                    className={`size-4 ${hardUpdate.isCoolingDown || hardUpdate.isHardUpdating ? 'text-[#6f897c]' : 'text-[#ffd166]'}`}
+                    aria-hidden="true"
+                  />
+                  {hardUpdate.isHardUpdating ? 'Solicitando' : hardUpdate.cooldownLabel ? `Aguarde ${hardUpdate.cooldownLabel}` : 'Hard Update'}
                 </button>
                 <button
                   type="button"
@@ -596,7 +739,7 @@ function App() {
       </header>
 
       {activeView === 'annual' ? (
-        <AnnualView />
+        <AnnualView hardUpdate={hardUpdate} />
       ) : (
       <div className="mx-auto max-w-[1560px] px-4 py-6 sm:px-6 lg:px-8">
         <section className="space-y-6">
@@ -636,6 +779,12 @@ function App() {
                 <div>
                   <p className="text-base font-medium text-[#8ba397]">Gasto total do mês</p>
                   <p className="mt-2 text-4xl font-semibold text-white sm:text-5xl">{formatMoney(expenses)}</p>
+                  <PlannedExpenseNote
+                    amount={plannedExpenses}
+                    count={plannedExpenseCount}
+                    paidCount={plannedExpensePaidCount}
+                    variant="hero"
+                  />
                 </div>
                 <div className="min-w-[260px]">
                   <div className="flex items-center justify-between gap-4 text-sm">
@@ -788,17 +937,26 @@ function App() {
           }}
         />
       ) : null}
+
+      {isRecurringMenuOpen ? (
+        <RecurringExpensesMenu
+          year={Number(dateFrom.slice(0, 4))}
+          onChanged={() => void loadSnapshot(false)}
+          onClose={() => setIsRecurringMenuOpen(false)}
+        />
+      ) : null}
     </main>
   )
 }
 
-function AnnualView() {
+function AnnualView({ hardUpdate }: { hardUpdate: HardUpdateState }) {
   const currentYear = new Date().getFullYear()
   const [year, setYear] = useState(currentYear)
   const [annual, setAnnual] = useState<AnnualSnapshot | null>(null)
   const [goals, setGoals] = useState<AnnualGoals>({})
   const [selectedMonthKey, setSelectedMonthKey] = useState<string | null>(null)
   const [isAnnualGoalsMenuOpen, setIsAnnualGoalsMenuOpen] = useState(false)
+  const [isRecurringMenuOpen, setIsRecurringMenuOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isDirty, setIsDirty] = useState(false)
@@ -878,6 +1036,15 @@ function AnnualView() {
     setSavedAt(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }))
   }
 
+  async function runAnnualHardUpdate() {
+    try {
+      await hardUpdate.triggerHardUpdate()
+      void loadAnnual()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Nao foi possivel solicitar o hard update.')
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-3 py-3 sm:px-5">
       <section
@@ -901,21 +1068,23 @@ function AnnualView() {
               <h2 className="mt-2 truncate text-2xl font-semibold text-white lg:text-3xl">Visão anual de {year}</h2>
             </div>
 
-            <div className="hidden min-w-0 grid-cols-4 gap-2 xl:grid">
-              <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="violet" />
-              <AnnualTopMetric
-                detail={`Bruto ${formatCompactMoney(currentInvestmentAmount)}`}
-                label="Investimento atual"
-                pending={annualInvestmentPendingSyncTitle ? { title: annualInvestmentPendingSyncTitle } : undefined}
-                value={formatCompactMoney(currentInvestmentBalance)}
-                tone="green"
-              />
-              <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="red" />
-              <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="blue" />
-            </div>
+            <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
+              <div className="hidden min-w-0 flex-1 justify-center xl:flex">
+                <div className="grid min-w-0 grid-cols-4 gap-2">
+                <AnnualTopMetric label="Montante atual" value={formatCompactMoney(currentGrossAmount)} tone="violet" />
+                <AnnualTopMetric
+                  detail={`Bruto ${formatCompactMoney(currentInvestmentAmount)}`}
+                  label="Investimento atual"
+                  pending={annualInvestmentPendingSyncTitle ? { title: annualInvestmentPendingSyncTitle } : undefined}
+                  value={formatCompactMoney(currentInvestmentBalance)}
+                  tone="green"
+                />
+                <AnnualTopMetric label="Gasto atual" value={formatCompactMoney(annualPlan.actualExpenseTotal)} tone="red" />
+                <AnnualTopMetric label="Invest. proj. dez." value={formatCompactMoney(projectedInvestmentDecember)} tone="blue" />
+                </div>
+              </div>
 
-            <div className="relative flex shrink-0 items-start gap-2">
-              <div className="relative hidden flex-col gap-2 sm:flex">
+              <div className="relative hidden shrink-0 items-center gap-2 sm:flex">
                 <label className="flex h-10 items-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-sm text-[#8ba397]">
                   <Calendar className="size-4 text-[#42f08f]" aria-hidden="true" />
                   <span className="sr-only">Ano</span>
@@ -929,12 +1098,51 @@ function AnnualView() {
                   />
                 </label>
                 <button
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[#263c34] bg-[#101a16] px-3 text-xs font-semibold text-[#8ba397] transition hover:border-[#39d681] hover:text-[#d8ffe7]"
+                  className="grid size-10 place-items-center rounded-lg border border-[#263c34] bg-[#101a16] text-[#8ba397] transition hover:border-[#39d681] hover:text-[#d8ffe7]"
                   type="button"
+                  title="Metas"
                   onClick={() => setIsAnnualGoalsMenuOpen((current) => !current)}
                 >
                   <SlidersHorizontal className="size-4 text-[#42f08f]" aria-hidden="true" />
-                  Metas
+                  <span className="sr-only">Metas</span>
+                </button>
+                <button
+                  className="grid size-10 place-items-center rounded-lg border border-[#263c34] bg-[#101a16] text-[#8ba397] transition hover:border-[#ffb15f] hover:text-[#ffe0b8]"
+                  type="button"
+                  title="Recorrentes"
+                  onClick={() => setIsRecurringMenuOpen(true)}
+                >
+                  <Repeat className="size-4 text-[#ffb15f]" aria-hidden="true" />
+                  <span className="sr-only">Recorrentes</span>
+                </button>
+                <button
+                  className="grid size-10 place-items-center rounded-lg border border-[#2f4c41] bg-[#10211b] text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
+                  type="button"
+                  title="Atualizar"
+                  onClick={() => void loadAnnual()}
+                >
+                  <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  <span className="sr-only">Atualizar</span>
+                </button>
+                <button
+                  className={`grid size-10 place-items-center rounded-lg border transition ${
+                    hardUpdate.isCoolingDown || hardUpdate.isHardUpdating
+                      ? 'cursor-not-allowed border-[#263c34] bg-[#101a16] text-[#6f897c]'
+                      : 'border-[#5b4720] bg-[#1b140d] text-[#ffd166] hover:border-[#ffd166]'
+                  }`}
+                  disabled={hardUpdate.isCoolingDown || hardUpdate.isHardUpdating}
+                  type="button"
+                  title={
+                    hardUpdate.isHardUpdating
+                      ? 'Solicitando hard update'
+                      : hardUpdate.cooldownLabel
+                        ? `Hard update disponível em ${hardUpdate.cooldownLabel}`
+                        : 'Hard update Pluggy'
+                  }
+                  onClick={() => void runAnnualHardUpdate()}
+                >
+                  <Zap className="size-4" aria-hidden="true" />
+                  <span className="sr-only">Hard update</span>
                 </button>
 
                 {isAnnualGoalsMenuOpen ? (
@@ -947,24 +1155,6 @@ function AnnualView() {
                   />
                 ) : null}
               </div>
-              <button
-                className="grid size-10 place-items-center rounded-lg border border-[#2f4c41] bg-[#10211b] text-[#d8ffe7] transition hover:border-[#39d681] hover:bg-[#123327]"
-                type="button"
-                title="Atualizar"
-                onClick={() => void loadAnnual()}
-              >
-                <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
-                <span className="sr-only">Atualizar</span>
-              </button>
-              <button
-                className="grid size-10 place-items-center rounded-lg bg-[#1ebc70] text-[#06100b] transition hover:bg-[#42f08f]"
-                type="button"
-                title="Salvar metas"
-                onClick={saveGoals}
-              >
-                <Save className="size-4" aria-hidden="true" />
-                <span className="sr-only">Salvar metas</span>
-              </button>
             </div>
           </div>
 
@@ -990,6 +1180,14 @@ function AnnualView() {
               <ErrorBanner message={error} />
             </div>
           ) : null}
+
+          {isRecurringMenuOpen ? (
+            <RecurringExpensesMenu
+              year={year}
+              onChanged={() => void loadAnnual()}
+              onClose={() => setIsRecurringMenuOpen(false)}
+            />
+          ) : null}
         </div>
       </section>
     </div>
@@ -1011,7 +1209,7 @@ type AnnualPlanMonth = AnnualSnapshot['months'][number] & {
 type AnnualChartTooltip = {
   detail: string
   title: string
-  tone: 'amber' | 'blue' | 'green' | 'red'
+  tone: 'amber' | 'blue' | 'green' | 'orange' | 'red'
   value: string
   x: number
   y: number
@@ -1255,6 +1453,257 @@ function CredentialField({
   )
 }
 
+function RecurringExpensesMenu({
+  onChanged,
+  onClose,
+  year,
+}: {
+  onChanged: () => void
+  onClose: () => void
+  year: number
+}) {
+  const [overview, setOverview] = useState<RecurringOverview | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [busyKey, setBusyKey] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const loadOverview = useCallback(async () => {
+    setIsLoading(true)
+    setMessage(null)
+
+    try {
+      const response = await fetch(`/api/recurring?year=${year}`)
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.details ? `${payload.error} ${payload.details}` : payload.error)
+      }
+
+      setOverview(payload as RecurringOverview)
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível carregar recorrentes.')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [year])
+
+  useEffect(() => {
+    void loadOverview()
+  }, [loadOverview])
+
+  async function removeRule(rule: RecurringRule) {
+    setBusyKey(rule.key)
+    setMessage(null)
+
+    try {
+      const response = await fetch('/api/recurring/remove', {
+        body: JSON.stringify({ id: rule.id, key: rule.key }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.details ? `${payload.error} ${payload.details}` : payload.error)
+      }
+
+      await loadOverview()
+      onChanged()
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível remover a recorrência.')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function addCandidate(candidate: RecurringCandidate) {
+    setBusyKey(candidate.key ?? candidate.id)
+    setMessage(null)
+
+    try {
+      const response = await fetch('/api/recurring/rules', {
+        body: JSON.stringify({ transaction: candidate }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload.details ? `${payload.error} ${payload.details}` : payload.error)
+      }
+
+      await loadOverview()
+      onChanged()
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : 'Não foi possível adicionar a recorrência.')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[#030504]/70 p-4 backdrop-blur-sm">
+      <section className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-[#244438] bg-[#09100d] shadow-[0_28px_90px_rgba(0,0,0,0.55)]">
+        <div className="flex items-start justify-between gap-4 border-b border-[#16231e] p-5">
+          <div>
+            <p className="text-sm font-semibold uppercase text-[#ffb15f]">Gastos planejados</p>
+            <h2 className="mt-1 text-2xl font-semibold text-white">Compras recorrentes</h2>
+          </div>
+          <button
+            className="grid size-10 place-items-center rounded-lg border border-[#263c34] bg-[#101a16] text-[#8ba397] transition hover:border-[#39d681] hover:text-white"
+            type="button"
+            onClick={onClose}
+          >
+            <X className="size-4" aria-hidden="true" />
+            <span className="sr-only">Fechar</span>
+          </button>
+        </div>
+
+        <div className="min-h-0 overflow-y-auto p-5">
+          {message ? (
+            <div className="mb-4 rounded-lg border border-[#5a3d1d] bg-[#1b140d] px-3 py-2 text-sm font-semibold text-[#ffc46b]">
+              {message}
+            </div>
+          ) : null}
+
+          {isLoading ? (
+            <div className="grid min-h-48 place-items-center rounded-lg border border-[#203a31] bg-[#0b1410]">
+              <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#d8ffe7]">
+                <LoaderCircle className="size-4 animate-spin text-[#42f08f]" aria-hidden="true" />
+                Buscando recorrências
+              </span>
+            </div>
+          ) : (
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
+              <section className="min-w-0">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-base font-semibold text-white">Identificadas</h3>
+                  <span className="rounded-md border border-[#263c34] bg-[#101a16] px-2 py-1 text-xs font-semibold text-[#8ba397]">
+                    {overview?.rules.length ?? 0}
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {overview?.rules.length ? (
+                    overview.rules.map((rule) => (
+                      <RecurringRuleRow
+                        key={rule.id}
+                        isBusy={busyKey === rule.key}
+                        rule={rule}
+                        onRemove={() => void removeRule(rule)}
+                      />
+                    ))
+                  ) : (
+                    <EmptyState label="Nenhuma recorrência identificada ainda" />
+                  )}
+                </div>
+              </section>
+
+              <section className="min-w-0">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-base font-semibold text-white">Adicionar movimentação</h3>
+                  <span className="rounded-md border border-[#263c34] bg-[#101a16] px-2 py-1 text-xs font-semibold text-[#8ba397]">
+                    {overview?.candidates.length ?? 0}
+                  </span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {overview?.candidates.length ? (
+                    overview.candidates.slice(0, 18).map((candidate) => (
+                      <RecurringCandidateRow
+                        key={`${candidate.id}-${candidate.key}`}
+                        candidate={candidate}
+                        isBusy={busyKey === (candidate.key ?? candidate.id)}
+                        onAdd={() => void addCandidate(candidate)}
+                      />
+                    ))
+                  ) : (
+                    <EmptyState label="Sem movimentações elegíveis para adicionar" />
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function RecurringRuleRow({
+  isBusy,
+  onRemove,
+  rule,
+}: {
+  isBusy: boolean
+  onRemove: () => void
+  rule: RecurringRule
+}) {
+  return (
+    <article className="flex items-center justify-between gap-3 rounded-lg border border-[#203a31] bg-[#0b1410] p-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate text-sm font-semibold text-white">{rule.label}</p>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${rule.origin === 'manual' ? 'bg-[#102824] text-[#75f4dc]' : 'bg-[#241a0e] text-[#ffc46b]'}`}>
+            {rule.origin === 'manual' ? 'Manual' : 'Detectado'}
+          </span>
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${rule.currentMonthStatus === 'paid' ? 'bg-[#103b2f] text-[#42f08f]' : 'bg-[#2a1c0d] text-[#ffb15f]'}`}>
+            {rule.currentMonthStatus === 'paid' ? 'Pago' : 'Pendente'}
+          </span>
+        </div>
+        <p className="mt-1 text-xs font-medium text-[#6f897c]">
+          {rule.method === 'Credito' ? 'Crédito' : 'Débito'} · dia {rule.dayOfMonth} · {rule.category}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <p className="text-sm font-semibold text-[#ffb15f]">{formatMoney(rule.amount)}</p>
+        <button
+          className="grid size-9 place-items-center rounded-lg border border-[#563032] bg-[#251113] text-[#ff8d8d] transition hover:border-[#ffb8b8] disabled:cursor-wait disabled:opacity-60"
+          disabled={isBusy}
+          type="button"
+          title="Remover recorrência"
+          onClick={onRemove}
+        >
+          {isBusy ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
+          <span className="sr-only">Remover</span>
+        </button>
+      </div>
+    </article>
+  )
+}
+
+function RecurringCandidateRow({
+  candidate,
+  isBusy,
+  onAdd,
+}: {
+  candidate: RecurringCandidate
+  isBusy: boolean
+  onAdd: () => void
+}) {
+  return (
+    <article className="flex items-center justify-between gap-3 rounded-lg border border-[#1f332b] bg-[#0b1410] p-3">
+      <div className="min-w-0">
+        <p className="truncate text-sm font-semibold text-white">{candidate.description}</p>
+        <p className="mt-1 text-xs font-medium text-[#6f897c]">
+          {formatDateLabel(candidate.date)} · {candidate.method === 'Credito' ? 'Crédito' : 'Débito'} · {candidate.category}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <p className="text-sm font-semibold text-[#d8ffe7]">{formatMoney(candidate.amount)}</p>
+        <button
+          className="grid size-9 place-items-center rounded-lg border border-[#256c52] bg-[#103b2f] text-[#42f08f] transition hover:border-[#42f08f] disabled:cursor-wait disabled:opacity-60"
+          disabled={isBusy}
+          type="button"
+          title="Adicionar recorrência"
+          onClick={onAdd}
+        >
+          {isBusy ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Plus className="size-4" aria-hidden="true" />}
+          <span className="sr-only">Adicionar</span>
+        </button>
+      </div>
+    </article>
+  )
+}
+
 function buildAnnualPlan(annual: AnnualSnapshot | null, goals: AnnualGoals) {
   const months = annual?.months ?? []
   const actualMonths = months.filter((month) => !month.isFuture && month.summary.transactionCount > 0)
@@ -1272,9 +1721,10 @@ function buildAnnualPlan(annual: AnnualSnapshot | null, goals: AnnualGoals) {
     const investmentGoalValue = parseGoal(goal.investmentGoal)
     const expenseBaseline = expenseGoalValue || averageExpense
     const investmentBaseline = investmentGoalValue || averageInvestment
+    const committedExpense = month.summary.expenses + month.summary.plannedExpenses
     const projectedExpense = month.isFuture
-      ? Math.max(month.summary.expenses, expenseBaseline)
-      : month.summary.expenses
+      ? Math.max(committedExpense, expenseBaseline)
+      : committedExpense
     const projectedInvestment = month.isFuture
       ? Math.max(month.summary.netInvestmentContribution, investmentBaseline)
       : month.summary.netInvestmentContribution
@@ -1302,6 +1752,7 @@ function buildAnnualPlan(annual: AnnualSnapshot | null, goals: AnnualGoals) {
   const maxGraphValue = Math.max(
     ...plannedMonths.flatMap((month) => [
       month.projectedExpense,
+      month.summary.expenses + month.summary.plannedExpenses,
       Math.abs(month.projectedInvestment),
       month.expenseGoalLineValue,
       month.investmentGoalLineValue,
@@ -1371,7 +1822,6 @@ function PendingDot({ title }: PendingHint) {
       aria-label={title}
       className="group absolute bottom-3 right-3 z-20 inline-flex size-4 items-center justify-center rounded-full outline-none"
       tabIndex={0}
-      title={title}
     >
       <span className="size-2.5 rounded-full bg-[#ffd166] shadow-[0_0_14px_rgba(255,209,102,0.85)]" />
       <span className="pointer-events-none absolute right-0 top-5 w-64 rounded-md border border-[#5b4720] bg-[#12110a] px-3 py-2 text-left text-xs font-semibold leading-relaxed text-[#ffe8a3] opacity-0 shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition group-hover:opacity-100 group-focus:opacity-100">
@@ -1406,6 +1856,7 @@ function AnnualInteractiveGraph({
         <div className="hidden shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs font-semibold text-[#8ba397] md:flex">
           <span className="inline-flex items-center gap-1"><span className="size-2 bg-[#42f08f]" />Invest. real</span>
           <span className="inline-flex items-center gap-1"><span className="size-2 bg-[#ff5f64]" />Gasto real</span>
+          <span className="inline-flex items-center gap-1"><span className="size-2 bg-[#ff9f43]" />Gasto planej.</span>
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-[#4aa3ff]" />Meta inv.</span>
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-full bg-[#ffd166]" />Meta gasto</span>
         </div>
@@ -1528,6 +1979,10 @@ function AnnualCompositeChart({
           <rect width="5" height="5" fill="#08100d" />
           <line x1="0" x2="0" y1="0" y2="5" stroke="#ff5f64" strokeOpacity="0.74" strokeWidth="0.85" />
         </pattern>
+        <pattern id="annual-orange-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="5" height="5" fill="#08100d" />
+          <line x1="0" x2="0" y1="0" y2="5" stroke="#ff9f43" strokeOpacity="0.76" strokeWidth="0.85" />
+        </pattern>
         <filter id="annual-glow" x="-30%" y="-30%" width="160%" height="160%">
           <feGaussianBlur stdDeviation="2.5" result="blur" />
           <feMerge>
@@ -1558,10 +2013,14 @@ function AnnualCompositeChart({
         const expenseValue = month.summary.expenses
         const expenseY = axisY
         const expenseHeight = negativeY(expenseValue) - axisY
+        const plannedExpenseValue = month.summary.plannedExpenses
+        const plannedExpenseY = expenseY + expenseHeight
+        const plannedExpenseHeight = negativeY(expenseValue + plannedExpenseValue) - negativeY(expenseValue)
         const isSelected = month.key === selectedMonthKey
         const expenseLabel = 'Gasto realizado'
+        const plannedExpenseLabel = 'Gasto planejado'
         const investmentLabel = 'Investido realizado'
-        const shouldRenderBars = !month.isFuture || expenseValue > 0 || investmentValue > 0
+        const shouldRenderBars = !month.isFuture || expenseValue > 0 || plannedExpenseValue > 0 || investmentValue > 0
 
         return (
           <g key={month.key}>
@@ -1629,6 +2088,33 @@ function AnnualCompositeChart({
                 >
                   <title>{`${month.label} ${expenseLabel.toLowerCase()}: -${formatMoney(expenseValue)}`}</title>
                 </rect>
+
+                {plannedExpenseValue > 0 ? (
+                  <rect
+                    className="cursor-pointer transition-opacity hover:opacity-90"
+                    fill="url(#annual-orange-hatch)"
+                    height={Math.max(plannedExpenseHeight, 2)}
+                    stroke="#ff9f43"
+                    strokeOpacity="0.96"
+                    strokeWidth="3.2"
+                    width={barWidth}
+                    x={x - barWidth / 2}
+                    y={plannedExpenseY}
+                    onClick={() => openMonth(month.key)}
+                    onMouseEnter={() => {
+                      showTooltip({
+                        detail: month.label,
+                        title: plannedExpenseLabel,
+                        tone: 'orange',
+                        value: `-${formatMoney(plannedExpenseValue)}`,
+                        x,
+                        y: plannedExpenseY + plannedExpenseHeight,
+                      })
+                    }}
+                  >
+                    <title>{`${month.label} ${plannedExpenseLabel.toLowerCase()}: -${formatMoney(plannedExpenseValue)}`}</title>
+                  </rect>
+                ) : null}
               </>
             ) : null}
 
@@ -1713,6 +2199,7 @@ function AnnualSvgTooltip({ tooltip }: { tooltip: AnnualChartTooltip | null }) {
     amber: '#ffd166',
     blue: '#4aa3ff',
     green: '#42f08f',
+    orange: '#ff9f43',
     red: '#ff8d8d',
   }[tooltip.tone]
 
@@ -1846,12 +2333,14 @@ function AnnualMonthFocus({
   onClose: () => void
 }) {
   const hasRealizedExpense = month.summary.expenses > 0
+  const hasPlannedExpense = month.summary.plannedExpenses > 0
   const hasRealizedInvestment = Math.abs(month.summary.netInvestmentContribution) > 0
   const monthName = getMonthName(month.dateFrom) || month.label
-  const expenseDelta = month.expenseGoalLineValue - month.summary.expenses
+  const committedExpense = month.summary.expenses + month.summary.plannedExpenses
+  const expenseDelta = month.expenseGoalLineValue - committedExpense
   const investmentDelta = month.summary.netInvestmentContribution - month.investmentGoalLineValue
   const expenseUsage = month.expenseGoalLineValue > 0
-    ? Math.round((month.summary.expenses / month.expenseGoalLineValue) * 100)
+    ? Math.round((committedExpense / month.expenseGoalLineValue) * 100)
     : 0
 
   return (
@@ -1883,6 +2372,11 @@ function AnnualMonthFocus({
             label="Gasto real"
             value={month.isFuture && !hasRealizedExpense ? '-' : `-${formatMoney(month.summary.expenses)}`}
             tone="red"
+          />
+          <AnnualFocusMetric
+            label="Gasto planej."
+            value={hasPlannedExpense ? `-${formatMoney(month.summary.plannedExpenses)}` : '-'}
+            tone="orange"
           />
           <AnnualFocusMetric label="Meta invest." value={formatMoney(month.investmentGoalLineValue)} tone="blue" />
           <AnnualFocusMetric label="Meta gasto" value={`-${formatMoney(month.expenseGoalLineValue)}`} tone="amber" />
@@ -1918,7 +2412,7 @@ function AnnualFocusMetric({
   value,
 }: {
   label: string
-  tone: 'amber' | 'blue' | 'cyan' | 'green' | 'light' | 'red' | 'violet'
+  tone: 'amber' | 'blue' | 'cyan' | 'green' | 'light' | 'orange' | 'red' | 'violet'
   value: string
 }) {
   const toneClass = {
@@ -1927,6 +2421,7 @@ function AnnualFocusMetric({
     cyan: 'text-[#67e8f9]',
     green: 'text-[#42f08f]',
     light: 'text-white',
+    orange: 'text-[#ff9f43]',
     red: 'text-[#ff5f64]',
     violet: 'text-[#a78bfa]',
   }[tone]
@@ -2085,6 +2580,34 @@ function FilterSelect({
         {children}
       </select>
     </label>
+  )
+}
+
+function PlannedExpenseNote({
+  amount,
+  count,
+  paidCount,
+  variant = 'card',
+}: {
+  amount: number
+  count: number
+  paidCount: number
+  variant?: 'card' | 'hero'
+}) {
+  const baseClass = variant === 'hero' ? 'mt-3 text-sm font-semibold' : 'mt-3 text-xs font-semibold'
+
+  if (!count) {
+    return <p className={`${baseClass} text-[#6f897c]`}>Sem gasto planejado</p>
+  }
+
+  if (amount <= 0 && paidCount >= count) {
+    return <p className={`${baseClass} text-[#42f08f]`}>Planejado do mês concluído</p>
+  }
+
+  return (
+    <p className={`${baseClass} text-[#ffb15f]`}>
+      + {formatMoney(amount)} planejado
+    </p>
   )
 }
 
